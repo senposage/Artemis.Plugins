@@ -10,14 +10,16 @@
              x:Class="Artemis.Plugins.LayerBrushes.Ambilight.Screens.CapturePropertiesView"
              x:DataType="screens:CapturePropertiesViewModel">
     <Grid RowDefinitions="Auto,*" ColumnDefinitions="Auto,*" Margin="15">
-        <Border Grid.Column="0"
-                Grid.Row="0"
-                Grid.RowSpan="2"
-                Margin="0 0 15 0"
-                Width="300"
-                Classes="card"
-                VerticalAlignment="Top"
-                HorizontalAlignment="Left">
+        <ScrollViewer Grid.Column="0"
+                      Grid.Row="0"
+                      Grid.RowSpan="2"
+                      Margin="0 0 15 0"
+                      Width="320"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      VerticalAlignment="Stretch"
+                      HorizontalAlignment="Left">
+        <Border Classes="card">
             <StackPanel>
                 <Grid VerticalAlignment="Stretch" Margin="-5 0" RowDefinitions="*,*" ColumnDefinitions="*,*">
                     <Label>Source region</Label>
@@ -143,8 +145,104 @@
                             ToolTip.Tip="Black-Bar detection threshold"
                             PointerCaptureLost="PointerInputFinished" />
                 </Grid>
+
+                <Separator Margin="0 15 0 10" />
+
+                <!-- Color Controls -->
+                <Label Content="Color adjustments" Margin="-5 0 0 0" />
+
+                <Label Content="Brightness" Margin="-5 5 0 0" />
+                <Grid ColumnDefinitions="Auto,*">
+                    <controls:NumberBox Grid.Column="0" Value="{CompiledBinding Brightness}" Margin="0 0 5 0" VerticalAlignment="Center"
+                                        Minimum="0" Maximum="300"
+                                        attachedProperties:NumberBoxAssist.SuffixText="%" />
+                    <Slider Grid.Column="1" Minimum="0" Maximum="300" Value="{CompiledBinding Brightness}"
+                            ToolTip.Tip="Brightness multiplier (100% = no change)" PointerCaptureLost="PointerInputFinished" />
+                </Grid>
+
+                <Label Content="Contrast" Margin="-5 5 0 0" />
+                <Grid ColumnDefinitions="Auto,*">
+                    <controls:NumberBox Grid.Column="0" Value="{CompiledBinding Contrast}" Margin="0 0 5 0" VerticalAlignment="Center"
+                                        Minimum="0" Maximum="300"
+                                        attachedProperties:NumberBoxAssist.SuffixText="%" />
+                    <Slider Grid.Column="1" Minimum="0" Maximum="300" Value="{CompiledBinding Contrast}"
+                            ToolTip.Tip="Contrast multiplier (100% = no change)" PointerCaptureLost="PointerInputFinished" />
+                </Grid>
+
+                <Label Content="Saturation" Margin="-5 5 0 0" />
+                <Grid ColumnDefinitions="Auto,*">
+                    <controls:NumberBox Grid.Column="0" Value="{CompiledBinding Saturation}" Margin="0 0 5 0" VerticalAlignment="Center"
+                                        Minimum="0" Maximum="300"
+                                        attachedProperties:NumberBoxAssist.SuffixText="%" />
+                    <Slider Grid.Column="1" Minimum="0" Maximum="300" Value="{CompiledBinding Saturation}"
+                            ToolTip.Tip="Saturation multiplier (100% = no change)" PointerCaptureLost="PointerInputFinished" />
+                </Grid>
+
+                <Label Content="Color temperature" Margin="-5 5 0 0" />
+                <Grid ColumnDefinitions="Auto,*">
+                    <controls:NumberBox Grid.Column="0" Value="{CompiledBinding ColorTemperature}" Margin="0 0 5 0" VerticalAlignment="Center"
+                                        Minimum="2000" Maximum="12000" SmallChange="100" LargeChange="500"
+                                        attachedProperties:NumberBoxAssist.SuffixText="K" />
+                    <Slider Grid.Column="1" Minimum="2000" Maximum="12000" TickFrequency="500" Value="{CompiledBinding ColorTemperature}"
+                            ToolTip.Tip="Color temperature (2000K warm — 6500K neutral — 12000K cool)" PointerCaptureLost="PointerInputFinished" />
+                </Grid>
+
+                <Grid VerticalAlignment="Stretch" Margin="-5 5" ColumnDefinitions="*,*">
+                    <StackPanel Grid.Column="0">
+                        <Label>Black point</Label>
+                        <controls:NumberBox Margin="5 0 5 5" Value="{CompiledBinding BlackPoint}" HorizontalAlignment="Stretch"
+                                            Minimum="0" Maximum="50" LostFocus="InputFinished" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <Label>White point</Label>
+                        <controls:NumberBox Margin="5 0 5 5" Value="{CompiledBinding WhitePoint}" HorizontalAlignment="Stretch"
+                                            Minimum="200" Maximum="255" LostFocus="InputFinished" />
+                    </StackPanel>
+                </Grid>
+
+                <Separator Margin="0 10 0 10" />
+
+                <!-- Smoothing -->
+                <Grid ColumnDefinitions="*,Auto">
+                    <Label Grid.Column="0" Content="Smoothing" Margin="-5 0 0 0" />
+                    <avalonia:MaterialIcon Grid.Column="1" VerticalAlignment="Center" Kind="HelpCircle"
+                                           ToolTip.Tip="Blends frames over time to reduce flicker and jitter. Higher values = smoother but more latency." />
+                </Grid>
+                <Grid ColumnDefinitions="Auto,*">
+                    <controls:NumberBox Grid.Column="0" Value="{CompiledBinding SmoothingFactor}" Margin="0 0 5 0" VerticalAlignment="Center"
+                                        Minimum="0" Maximum="95"
+                                        attachedProperties:NumberBoxAssist.SuffixText="%" />
+                    <Slider Grid.Column="1" Minimum="0" Maximum="95" Value="{CompiledBinding SmoothingFactor}"
+                            ToolTip.Tip="Temporal smoothing (0% = off, 95% = maximum)" PointerCaptureLost="PointerInputFinished" />
+                </Grid>
+
+                <Separator Margin="0 10 0 10" />
+
+                <!-- Performance -->
+                <Label Content="Performance" Margin="-5 0 0 0" />
+
+                <Label Content="Frame skip" Margin="-5 5 0 0" />
+                <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
+                    <controls:NumberBox Grid.Column="0" Grid.Row="0" Value="{CompiledBinding FrameSkip}" Margin="0 0 5 0" VerticalAlignment="Center"
+                                        Minimum="0" Maximum="30" />
+                    <Slider Grid.Column="1" Grid.Row="0" Minimum="0" Maximum="30" TickFrequency="1" TickPlacement="BottomRight"
+                            Value="{CompiledBinding FrameSkip}"
+                            ToolTip.Tip="Skip N frames between captures (0 = capture every frame)" PointerCaptureLost="PointerInputFinished" />
+                </Grid>
+
+                <Label Content="Capture FPS limit" Margin="-5 5 0 0" />
+                <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
+                    <controls:NumberBox Grid.Column="0" Grid.Row="0" Value="{CompiledBinding CaptureFpsLimit}" Margin="0 0 5 0" VerticalAlignment="Center"
+                                        Minimum="0" Maximum="144"
+                                        attachedProperties:NumberBoxAssist.SuffixText="fps" />
+                    <Slider Grid.Column="1" Grid.Row="0" Minimum="0" Maximum="144" TickFrequency="15" TickPlacement="BottomRight"
+                            Value="{CompiledBinding CaptureFpsLimit}"
+                            ToolTip.Tip="Maximum capture rate (0 = unlimited)" PointerCaptureLost="PointerInputFinished" />
+                </Grid>
+
             </StackPanel>
         </Border>
+        </ScrollViewer>
 
         <ScrollViewer Grid.Column="1" Grid.Row="0" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Auto" Padding="0 0 0 15" Margin="0 0 0 15">
             <ItemsControl ItemsSource="{CompiledBinding CaptureScreens}">

@@ -16,7 +16,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         #region Properties & Fields
 
-        internal static IScreenCaptureService? ScreenCaptureService { get; private set; }
+        internal static AmbilightScreenCaptureService? ScreenCaptureService { get; private set; }
 
         #endregion
 
@@ -32,6 +32,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             ScreenCaptureService ??= new AmbilightScreenCaptureService(screenCaptureService);
             if (OperatingSystem.IsWindows())
             {
+                // DisplaySettingsChanging fires BEFORE the change - suspend capture to prevent
+                // native access violations in the graphics driver from stale DXGI resources.
+                SystemEvents.DisplaySettingsChanging += SystemEventsOnDisplaySettingsChanging;
                 SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
             }
         }
@@ -42,8 +45,17 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             ScreenCaptureService = null;
             if (OperatingSystem.IsWindows())
             {
+                SystemEvents.DisplaySettingsChanging -= SystemEventsOnDisplaySettingsChanging;
                 SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
             }
+        }
+
+        private void SystemEventsOnDisplaySettingsChanging(object? sender, EventArgs e)
+        {
+            // Suspend all captures BEFORE the display change happens.
+            // This stops the DX11 capture loop from calling into the driver with stale resources.
+            _logger?.Debug("Display settings changing, suspending all screen captures");
+            ScreenCaptureService?.SuspendAllCaptures();
         }
 
         private void SystemEventsOnDisplaySettingsChanged(object? sender, EventArgs e)

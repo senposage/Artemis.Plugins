@@ -48,8 +48,27 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             }
         }
 
+        /// <summary>
+        /// Suspends all active screen captures. Call this BEFORE display settings change
+        /// to prevent native access violations in the graphics driver.
+        /// </summary>
+        public void SuspendAllCaptures()
+        {
+            lock (_screenCaptures)
+            {
+                foreach (IScreenCapture screenCapture in _screenCaptures.Values)
+                {
+                    if (screenCapture is AmbilightScreenCapture ambilightCapture)
+                        ambilightCapture.Suspend();
+                }
+            }
+        }
+
         public void Dispose()
         {
+            // Suspend first to stop DX11 calls before disposing resources
+            SuspendAllCaptures();
+
             foreach (IScreenCapture screenCapture in _screenCaptures.Values)
                 screenCapture.Dispose();
             _screenCaptures.Clear();

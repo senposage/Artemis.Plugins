@@ -8,7 +8,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         public override void Enable()
         {
-            RegisterLayerBrushDescriptor<AmbilightLayerBrush>("Ambilight", "A brush that shows the current display-image.", "MonitorMultiple");
+            RegisterLayerBrushDescriptor<AmbilightLayerBrush>("Ambilight v2", "A brush that shows the current display-image with stable monitor identification.", "MonitorMultiple");
         }
 
         public override void Disable()

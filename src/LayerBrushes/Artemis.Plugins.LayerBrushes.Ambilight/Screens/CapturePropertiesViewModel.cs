@@ -6,6 +6,7 @@ using System.Reactive.Disposables;
 using System.Reactive.Disposables.Fluent;
 using System.Threading.Tasks;
 using Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups;
+using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
 using Artemis.UI.Shared.LayerBrushes;
 using Artemis.UI.Shared.Services;
 using Artemis.UI.Shared.Services.Builders;
@@ -46,6 +47,19 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     private int _y;
     private bool _saveOnChange;
 
+    // Color controls (stored as percentages in the UI, converted to 0-1 / -1..1 floats when saving)
+    private int _brightness;
+    private int _contrast;
+    private int _saturation;
+    private int _colorTemperature;
+    private int _blackPoint;
+    private int _whitePoint;
+
+    // Smoothing & performance
+    private int _smoothingFactor;
+    private int _frameSkip;
+    private int _captureFpsLimit;
+
     public CapturePropertiesViewModel(AmbilightLayerBrush layerBrush, IWindowService windowService) : base(layerBrush)
     {
         _windowService = windowService;
@@ -67,8 +81,6 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         {
             Initialize(d);
             this.WhenAnyValue(vm => vm.SelectedCaptureScreen).Subscribe(OnSelectedCaptureScreenChanged);
-
-            _saveOnChange = true;
         });
     }
     
@@ -173,6 +185,62 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         set => RaiseAndSetIfChanged(ref _blackBarDetectionThreshold, value);
     }
 
+    // Color controls (UI shows percentages: -100..100 or 0..100)
+    public int Brightness
+    {
+        get => _brightness;
+        set => RaiseAndSetIfChanged(ref _brightness, value);
+    }
+
+    public int Contrast
+    {
+        get => _contrast;
+        set => RaiseAndSetIfChanged(ref _contrast, value);
+    }
+
+    public int Saturation
+    {
+        get => _saturation;
+        set => RaiseAndSetIfChanged(ref _saturation, value);
+    }
+
+    public int ColorTemperature
+    {
+        get => _colorTemperature;
+        set => RaiseAndSetIfChanged(ref _colorTemperature, value);
+    }
+
+    public int BlackPoint
+    {
+        get => _blackPoint;
+        set => RaiseAndSetIfChanged(ref _blackPoint, value);
+    }
+
+    public int WhitePoint
+    {
+        get => _whitePoint;
+        set => RaiseAndSetIfChanged(ref _whitePoint, value);
+    }
+
+    // Smoothing & performance
+    public int SmoothingFactor
+    {
+        get => _smoothingFactor;
+        set => RaiseAndSetIfChanged(ref _smoothingFactor, value);
+    }
+
+    public int FrameSkip
+    {
+        get => _frameSkip;
+        set => RaiseAndSetIfChanged(ref _frameSkip, value);
+    }
+
+    public int CaptureFpsLimit
+    {
+        get => _captureFpsLimit;
+        set => RaiseAndSetIfChanged(ref _captureFpsLimit, value);
+    }
+
     public bool EnableValidation
     {
         get => _enableValidation;
@@ -197,6 +265,16 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         BlackBarDetectionLeft = _properties.BlackBarDetectionLeft;
         BlackBarDetectionRight = _properties.BlackBarDetectionRight;
         BlackBarDetectionThreshold = _properties.BlackBarDetectionThreshold;
+
+        Brightness = (int)((_properties.Brightness.CurrentValue + 1f) * 100f);
+        Contrast = (int)((_properties.Contrast.CurrentValue + 1f) * 100f);
+        Saturation = (int)((_properties.Saturation.CurrentValue + 1f) * 100f);
+        ColorTemperature = (int)(6500f - _properties.ColorTemperature.CurrentValue * 5500f);
+        BlackPoint = _properties.BlackPoint;
+        WhitePoint = _properties.WhitePoint;
+        SmoothingFactor = (int)(_properties.SmoothingFactor.CurrentValue * 100f);
+        FrameSkip = _properties.FrameSkip;
+        CaptureFpsLimit = _properties.CaptureFpsLimit;
 
         if (_properties.CaptureFullScreen && SelectedCaptureScreen != null)
         {
@@ -224,11 +302,24 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         _properties.BlackBarDetectionRight.SetCurrentValue(BlackBarDetectionRight);
         _properties.BlackBarDetectionThreshold.SetCurrentValue(BlackBarDetectionThreshold);
 
+        _properties.Brightness.SetCurrentValue((Brightness / 100f) - 1f);
+        _properties.Contrast.SetCurrentValue((Contrast / 100f) - 1f);
+        _properties.Saturation.SetCurrentValue((Saturation / 100f) - 1f);
+        _properties.ColorTemperature.SetCurrentValue((6500f - ColorTemperature) / 5500f);
+        _properties.BlackPoint.SetCurrentValue(BlackPoint);
+        _properties.WhitePoint.SetCurrentValue(WhitePoint);
+        _properties.SmoothingFactor.SetCurrentValue(SmoothingFactor / 100f);
+        _properties.FrameSkip.SetCurrentValue(FrameSkip);
+        _properties.CaptureFpsLimit.SetCurrentValue(CaptureFpsLimit);
+
         if (SelectedCaptureScreen != null)
         {
             _properties.GraphicsCardVendorId.SetCurrentValue(SelectedCaptureScreen.Display.GraphicsCard.VendorId);
             _properties.GraphicsCardDeviceId.SetCurrentValue(SelectedCaptureScreen.Display.GraphicsCard.DeviceId);
             _properties.DisplayName.SetCurrentValue(SelectedCaptureScreen.Display.DeviceName);
+
+            if (OperatingSystem.IsWindows())
+                _properties.MonitorDevicePath.SetCurrentValue(MonitorIdentifier.GetMonitorDevicePath(SelectedCaptureScreen.Display.DeviceName) ?? "");
 
             _properties.CaptureFullScreen.SetCurrentValue(X == 0 &&
                                                           Y == 0 &&
@@ -247,6 +338,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
             return;
 
         Load();
+        _saveOnChange = true;
         EnableValidation = true;
 
         Disposable.Create(() =>
@@ -273,9 +365,21 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
             return false;
         }
 
-        SelectedCaptureScreen = CaptureScreens.FirstOrDefault(s => s.Display.GraphicsCard.VendorId == _properties.GraphicsCardVendorId &&
-                                                                   s.Display.GraphicsCard.DeviceId == _properties.GraphicsCardDeviceId &&
-                                                                   s.Display.DeviceName == _properties.DisplayName.CurrentValue) ?? CaptureScreens.First();
+        // Try to match by stable monitor path first (survives display ID shifts)
+        CaptureScreenViewModel? matched = null;
+        if (OperatingSystem.IsWindows() && !string.IsNullOrEmpty(_properties.MonitorDevicePath.CurrentValue))
+        {
+            var monitorMap = MonitorIdentifier.BuildMonitorToAdapterMap();
+            if (monitorMap.TryGetValue(_properties.MonitorDevicePath.CurrentValue, out string? currentAdapterName))
+                matched = CaptureScreens.FirstOrDefault(s => s.Display.DeviceName.Equals(currentAdapterName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Fall back to legacy GPU + DisplayName matching
+        matched ??= CaptureScreens.FirstOrDefault(s => s.Display.GraphicsCard.VendorId == _properties.GraphicsCardVendorId &&
+                                                        s.Display.GraphicsCard.DeviceId == _properties.GraphicsCardDeviceId &&
+                                                        s.Display.DeviceName == _properties.DisplayName.CurrentValue);
+
+        SelectedCaptureScreen = matched ?? CaptureScreens.First();
         SelectedCaptureScreen.IsSelected = true;
         return true;
     }
