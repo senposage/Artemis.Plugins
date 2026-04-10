@@ -97,6 +97,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             _fpsLimit = Math.Max(0, fps);
         }
 
+
         private void UpdateLoop()
         {
             int consecutiveErrors = 0;
@@ -105,8 +106,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             {
                 _cancellationToken.ThrowIfCancellationRequested();
 
-                // When suspended (display change incoming), sleep instead of calling into DX11.
-                // This prevents native AVs in the graphics driver from stale DXGI resources.
+                // When suspended (display change incoming), sleep instead of calling into D3D11.
                 if (_suspended)
                 {
                     Thread.Sleep(50);
@@ -189,9 +189,10 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         public bool UnregisterCaptureZone(ICaptureZone captureZone)
         {
+            ICaptureZone inner = captureZone;
             lock (_screenCapture)
             {
-                bool result = _screenCapture.UnregisterCaptureZone(captureZone);
+                bool result = _screenCapture.UnregisterCaptureZone(inner);
                 if (result)
                     _zoneCount--;
 

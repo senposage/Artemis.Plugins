@@ -28,6 +28,16 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         // Smoothing
         private SKBitmap? _smoothedBitmap;
 
+        // Cached color adjustment state — avoids recreating GPU resources every frame
+        private SKPaint? _colorPaint;
+        private SKColorFilter? _cachedColorFilter;
+        private float _lastBrightness = float.NaN;
+        private float _lastContrast = float.NaN;
+        private float _lastSaturation = float.NaN;
+        private float _lastTemperature = float.NaN;
+        private int _lastBlackPoint = -1;
+        private int _lastWhitePoint = -1;
+
         #endregion
 
         #region Methods
@@ -90,8 +100,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                                 blendCanvas.DrawImage(skImage, 0, 0, blendPaint);
                             }
 
-                            using SKImage smoothedImage = SKImage.FromBitmap(_smoothedBitmap);
-                            DrawWithColorAdjustments(canvas, smoothedImage, bounds, paint, properties);
+                            DrawSmoothedWithColorAdjustments(canvas, bounds, paint, properties);
                         }
                         else
                         {
@@ -106,7 +115,26 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
         }
 
-        private static void DrawWithColorAdjustments(SKCanvas canvas, SKImage image, SKRect bounds, SKPaint paint, AmbilightCaptureProperties props)
+        /// <summary>
+        /// Draws from the smoothed bitmap without creating an intermediate SKImage GPU texture copy.
+        /// </summary>
+        private void DrawSmoothedWithColorAdjustments(SKCanvas canvas, SKRect bounds, SKPaint paint, AmbilightCaptureProperties props)
+        {
+            SKPaint effectivePaint = GetColorAdjustedPaint(paint, props);
+            canvas.DrawBitmap(_smoothedBitmap!, bounds, effectivePaint);
+        }
+
+        private void DrawWithColorAdjustments(SKCanvas canvas, SKImage image, SKRect bounds, SKPaint paint, AmbilightCaptureProperties props)
+        {
+            SKPaint effectivePaint = GetColorAdjustedPaint(paint, props);
+            canvas.DrawImage(image, bounds, effectivePaint);
+        }
+
+        /// <summary>
+        /// Returns a paint with the cached color filter applied, or the original paint if no adjustments are needed.
+        /// The color filter is only rebuilt when parameters actually change.
+        /// </summary>
+        private SKPaint GetColorAdjustedPaint(SKPaint paint, AmbilightCaptureProperties props)
         {
             float brightness = props.Brightness.CurrentValue;
             float contrast = props.Contrast.CurrentValue;
@@ -120,28 +148,47 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
             if (!hasColorAdjustment)
             {
-                canvas.DrawImage(image, bounds, paint);
-                return;
+                // Dispose cached resources when adjustments are turned off
+                if (_cachedColorFilter != null)
+                {
+                    _cachedColorFilter.Dispose();
+                    _cachedColorFilter = null;
+                    _colorPaint?.Dispose();
+                    _colorPaint = null;
+                    _lastBrightness = float.NaN;
+                }
+                return paint;
             }
 
-            using var colorPaint = paint.Clone();
+            // Only rebuild the color filter when parameters have actually changed
+            if (brightness != _lastBrightness || contrast != _lastContrast || saturation != _lastSaturation ||
+                temperature != _lastTemperature || blackPoint != _lastBlackPoint || whitePoint != _lastWhitePoint)
+            {
+                _lastBrightness = brightness;
+                _lastContrast = contrast;
+                _lastSaturation = saturation;
+                _lastTemperature = temperature;
+                _lastBlackPoint = blackPoint;
+                _lastWhitePoint = whitePoint;
 
-            // Build color matrix combining all adjustments
-            float[] matrix = BuildColorMatrix(brightness, contrast, saturation, temperature, blackPoint, whitePoint);
-            colorPaint.ColorFilter = SKColorFilter.CreateColorMatrix(matrix);
+                _cachedColorFilter?.Dispose();
+                Span<float> matrix = stackalloc float[20];
+                BuildColorMatrix(matrix, brightness, contrast, saturation, temperature, blackPoint, whitePoint);
+                _cachedColorFilter = SKColorFilter.CreateColorMatrix(matrix.ToArray());
+            }
 
-            canvas.DrawImage(image, bounds, colorPaint);
+            // Reuse the paint — clone once, then just update the filter
+            if (_colorPaint == null)
+                _colorPaint = paint.Clone();
+            _colorPaint.ColorFilter = _cachedColorFilter;
+            return _colorPaint;
         }
 
-        private static float[] BuildColorMatrix(float brightness, float contrast, float saturation, float temperature, int blackPoint, int whitePoint)
+        private static void BuildColorMatrix(Span<float> m, float brightness, float contrast, float saturation, float temperature, int blackPoint, int whitePoint)
         {
-            // Start with identity
-            float[] m = {
-                1, 0, 0, 0, 0,
-                0, 1, 0, 0, 0,
-                0, 0, 1, 0, 0,
-                0, 0, 0, 1, 0
-            };
+            // Identity
+            m.Clear();
+            m[0] = 1; m[6] = 1; m[12] = 1; m[18] = 1;
 
             // Brightness: shift RGB
             if (brightness != 0f)
@@ -155,7 +202,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             // Contrast: scale around midpoint
             if (contrast != 0f)
             {
-                float c = 1f + contrast; // -1..1 maps to 0..2
+                float c = 1f + contrast;
                 float t = 127.5f * (1f - c);
                 m[0] *= c; m[1] *= c; m[2] *= c; m[4] += t;
                 m[5] *= c; m[6] *= c; m[7] *= c; m[9] += t;
@@ -165,21 +212,23 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             // Saturation: mix with luminance
             if (saturation != 0f)
             {
-                float s = 1f + saturation; // -1..1 maps to 0..2
+                float s = 1f + saturation;
                 float sr = (1f - s) * 0.2126f;
                 float sg = (1f - s) * 0.7152f;
                 float sb = (1f - s) * 0.0722f;
 
-                float[] sat = {
-                    sr + s, sg,     sb,     0, 0,
-                    sr,     sg + s, sb,     0, 0,
-                    sr,     sg,     sb + s, 0, 0,
-                    0,      0,      0,      1, 0
-                };
-                m = MultiplyColorMatrices(sat, m);
+                Span<float> sat = stackalloc float[20];
+                sat[0] = sr + s; sat[1] = sg;     sat[2] = sb;
+                sat[5] = sr;     sat[6] = sg + s; sat[7] = sb;
+                sat[10] = sr;    sat[11] = sg;    sat[12] = sb + s;
+                sat[18] = 1;
+
+                Span<float> tmp = stackalloc float[20];
+                MultiplyColorMatrices(sat, m, tmp);
+                tmp.CopyTo(m);
             }
 
-            // Color temperature: warm (positive) shifts red up / blue down, cool (negative) is opposite
+            // Color temperature: warm (positive) shifts red up / blue down
             if (temperature != 0f)
             {
                 float rShift = temperature * 30f;
@@ -200,13 +249,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 m[6] *= scale; m[9] += offset;
                 m[12] *= scale; m[14] += offset;
             }
-
-            return m;
         }
 
-        private static float[] MultiplyColorMatrices(float[] a, float[] b)
+        private static void MultiplyColorMatrices(ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> result)
         {
-            float[] result = new float[20];
+            result.Clear();
             for (int row = 0; row < 4; row++)
             {
                 for (int col = 0; col < 5; col++)
@@ -219,7 +266,6 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                     result[row * 5 + col] = sum;
                 }
             }
-            return result;
         }
 
         public override void EnableLayerBrush()
@@ -299,6 +345,10 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             RemoveCaptureZone();
             _smoothedBitmap?.Dispose();
             _smoothedBitmap = null;
+            _cachedColorFilter?.Dispose();
+            _cachedColorFilter = null;
+            _colorPaint?.Dispose();
+            _colorPaint = null;
         }
 
         #endregion
