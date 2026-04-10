@@ -91,10 +91,15 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         /// <summary>
         /// Sets the maximum capture rate. 0 = unlimited.
+        /// Also forwards to WGC's MinUpdateInterval so DWM can skip capture work.
         /// </summary>
         public void SetFpsLimit(int fps)
         {
             _fpsLimit = Math.Max(0, fps);
+
+            // Forward to WGC so it can set MinUpdateInterval on the session.
+            if (_screenCapture is Wgc.WgcScreenCapture wgc)
+                wgc.SetFpsLimit(_fpsLimit);
         }
 
 

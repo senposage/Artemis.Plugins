@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using System.Threading;
 using ScreenCapture.NET;
 using Serilog;
 using Vortice.Direct3D11;
@@ -19,10 +17,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wgc;
 /// <summary>
 /// IScreenCapture implementation using the Windows Graphics Capture API.
 ///
-/// Uses on-demand capture: the WGC session is started only when a frame is needed
-/// and stopped immediately after, so DWM only does composition work during the
-/// brief active window.  Combined with GPU-side mip downscaling, this keeps both
-/// DWM and Artemis GPU usage minimal.
+/// The WGC session is kept alive between frames to avoid the heavy DWM overhead of
+/// repeatedly creating and tearing down the capture pipeline.  Frame holding (pool
+/// size 2, previous frame kept alive) prevents DWM from doing capture copies while
+/// we sleep between grabs.  MinUpdateInterval (24H2+) further tells DWM it can skip
+/// capture work entirely between our desired intervals.
 /// </summary>
 [SupportedOSPlatform("windows10.0.19041.0")]
 internal sealed class WgcScreenCapture : IScreenCapture
@@ -61,11 +60,18 @@ internal sealed class WgcScreenCapture : IScreenCapture
     private GraphicsCaptureItem? _captureItem;
     private volatile bool _closed;
 
-    // Per-capture-cycle — created/disposed each time to minimise DWM overhead
+    // Session + pool — kept alive between frames, only torn down on Restart/Dispose
     private Direct3D11CaptureFramePool? _framePool;
     private GraphicsCaptureSession? _session;
 
+    // Frame holding: keep the previous frame alive to occupy a pool buffer.
+    // With pool size 2 this means DWM has at most 1 free buffer — once it fills
+    // that one it stops doing capture copies until we consume, drastically reducing
+    // DWM GPU work between our capture intervals.
+    private Direct3D11CaptureFrame? _heldFrame;
+
     private volatile bool _disposed;
+    private volatile int _fpsLimit;
 
     // GPU mip-chain texture for hardware downscaling
     private ID3D11Texture2D? _mipTexture;
@@ -164,7 +170,11 @@ internal sealed class WgcScreenCapture : IScreenCapture
     }
 
     /// <summary>
-    /// Starts a WGC capture session. Lightweight — capture item is reused.
+    /// Starts a WGC capture session if not already running.  Pool size 2 allows
+    /// double-buffering: we hold the previous frame (occupying 1 buffer) while a
+    /// new frame sits pre-delivered in the other.  Once both are occupied DWM has
+    /// 0 free buffers and stops capture copies — resuming only after we dispose
+    /// the old frame during the next grab.
     /// </summary>
     private void StartSession()
     {
@@ -175,20 +185,47 @@ internal sealed class WgcScreenCapture : IScreenCapture
             _framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
                 _winrtDevice,
                 DirectXPixelFormat.B8G8R8A8UIntNormalized,
-                1,
+                2, // double-buffer: 1 held + 1 pre-delivered = 0 free → DWM stops capture copies between grabs
                 _captureItem!.Size);
 
             _session = _framePool.CreateCaptureSession(_captureItem);
             _session.IsCursorCaptureEnabled = false;
+            _session.IsBorderRequired = false;
+
+            // MinUpdateInterval (24H2+) tells DWM to skip capture work between intervals.
+            // This is the key to reducing DWM GPU usage during high-FPS games.
+            ApplyMinUpdateInterval();
+
             _session.StartCapture();
+            Logger.Debug("WGC session started for {Display}", Display.DeviceName);
         }
     }
 
     /// <summary>
-    /// Stops the capture session to minimise DWM overhead between frames.
-    /// The capture item is kept alive for fast restart.
+    /// Sets the capture FPS limit. Updates MinUpdateInterval on the active session
+    /// so DWM can skip capture work between intervals.
     /// </summary>
-    private void PauseSession()
+    internal void SetFpsLimit(int fps)
+    {
+        _fpsLimit = Math.Max(0, fps);
+        lock (_sessionLock)
+            ApplyMinUpdateInterval();
+    }
+
+    private void ApplyMinUpdateInterval()
+    {
+        if (_session == null) return;
+        int fps = _fpsLimit;
+        _session.MinUpdateInterval = fps > 0
+            ? TimeSpan.FromSeconds(1.0 / fps)
+            : TimeSpan.Zero;
+    }
+
+    /// <summary>
+    /// Stops the capture session and releases its resources.
+    /// Only called during Restart/Dispose — not between frames.
+    /// </summary>
+    private void StopSession()
     {
         lock (_sessionLock)
         {
@@ -201,6 +238,9 @@ internal sealed class WgcScreenCapture : IScreenCapture
 
     private void StopSessionUnlocked()
     {
+        // Called from within _sessionLock — direct disposal without re-locking
+        _heldFrame?.Dispose();
+        _heldFrame = null;
         _session?.Dispose();
         _session = null;
         _framePool?.Dispose();
@@ -271,23 +311,6 @@ internal sealed class WgcScreenCapture : IScreenCapture
 
     #region Capture
 
-    /// <summary>
-    /// Waits briefly for the first frame after session start.
-    /// Returns null if no frame arrives within the timeout.
-    /// </summary>
-    private Direct3D11CaptureFrame? WaitForFrame(int timeoutMs = 50)
-    {
-        var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < timeoutMs)
-        {
-            Direct3D11CaptureFrame? frame = _framePool?.TryGetNextFrame();
-            if (frame != null)
-                return frame;
-            Thread.Sleep(1);
-        }
-        return null;
-    }
-
     public unsafe bool CaptureScreen()
     {
         if (_disposed) return false;
@@ -309,17 +332,22 @@ internal sealed class WgcScreenCapture : IScreenCapture
         if (minDownscale == int.MaxValue)
             return false; // no zone needs data
 
-        // On-demand: start session → grab frame → stop session.
-        // DWM only composes WGC frames while the session is active.
+        // Session stays alive between frames — avoids costly DWM setup/teardown.
         EnsureCaptureItem();
         StartSession();
 
-        Direct3D11CaptureFrame? frame = WaitForFrame();
+        // Pool size 2 + frame holding: one buffer is occupied by _heldFrame, the
+        // other was pre-filled by DWM during our sleep.  Grab the pre-filled frame,
+        // then release the old one — DWM refills that buffer and stops (0 free).
+        Direct3D11CaptureFrame? frame = _framePool?.TryGetNextFrame();
         if (frame == null)
-        {
-            PauseSession();
             return false;
-        }
+
+        // Release previously held frame AFTER grabbing the new one.
+        // This is the key ordering: grab → release → DWM fills 1 → stops.
+        // (Releasing first would let DWM fill both, wasting a GPU copy.)
+        _heldFrame?.Dispose();
+        _heldFrame = null;
 
         try
         {
@@ -372,13 +400,17 @@ internal sealed class WgcScreenCapture : IScreenCapture
                 context.Unmap(_stagingTexture!, 0);
             }
 
+            // Hold this frame — keeps 1 pool buffer occupied so DWM has only 1 free.
+            // DWM fills the free one and stops doing capture copies until next grab.
+            _heldFrame = frame;
+            frame = null; // prevent disposal in finally
+
             Updated?.Invoke(this, new ScreenCaptureUpdatedEventArgs(true));
             return true;
         }
         finally
         {
-            frame.Dispose();
-            PauseSession();
+            frame?.Dispose(); // only reached on processing failure
         }
     }
 
