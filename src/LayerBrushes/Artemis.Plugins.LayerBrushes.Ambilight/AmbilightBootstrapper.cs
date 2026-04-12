@@ -13,7 +13,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
     {
         private ILogger? _logger;
         private IPluginManagementService? _managementService;
+        private IRenderService? _renderService;
         private PluginFeatureInfo? _brushProvider;
+        private WindowsDisplayStateMonitor? _displayStateMonitor;
 
         #region Properties & Fields
 
@@ -27,6 +29,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         {
             _logger = plugin.Resolve<ILogger>();
             _managementService = plugin.Resolve<IPluginManagementService>();
+            _renderService = plugin.Resolve<IRenderService>();
             _brushProvider = plugin.GetFeatureInfo<AmbilightLayerBrushProvider>();
 
             IScreenCaptureService screenCaptureService = CreateScreenCaptureService();
@@ -37,17 +40,28 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 // native access violations in the graphics driver from stale DXGI resources.
                 SystemEvents.DisplaySettingsChanging += SystemEventsOnDisplaySettingsChanging;
                 SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
+                SystemEvents.PowerModeChanged += SystemEventsOnPowerModeChanged;
+                _displayStateMonitor = new WindowsDisplayStateMonitor();
+                _displayStateMonitor.DisplayStateChanged += DisplayStateMonitorOnDisplayStateChanged;
             }
         }
 
         public override void OnPluginDisabled(Plugin plugin)
         {
+            if (_displayStateMonitor != null)
+            {
+                _displayStateMonitor.DisplayStateChanged -= DisplayStateMonitorOnDisplayStateChanged;
+                _displayStateMonitor.Dispose();
+                _displayStateMonitor = null;
+            }
+
             ScreenCaptureService?.Dispose();
             ScreenCaptureService = null;
             if (OperatingSystem.IsWindows())
             {
                 SystemEvents.DisplaySettingsChanging -= SystemEventsOnDisplaySettingsChanging;
                 SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
+                SystemEvents.PowerModeChanged -= SystemEventsOnPowerModeChanged;
             }
         }
 
@@ -81,6 +95,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             // This stops the DX11 capture loop from calling into the driver with stale resources.
             _logger?.Debug("Display settings changing, suspending all screen captures");
             ScreenCaptureService?.SuspendAllCaptures();
+            RequestImmediateRender();
         }
 
         private void SystemEventsOnDisplaySettingsChanged(object? sender, EventArgs e)
@@ -90,13 +105,67 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             else
             {
                 _logger?.Debug("Display settings changed, restarting ambilight feature");
-
-                _managementService?.DisablePluginFeature(_brushProvider.Instance, false);
-                ScreenCaptureService?.Dispose();
-                IScreenCaptureService screenCaptureService = CreateScreenCaptureService();
-                ScreenCaptureService = new AmbilightScreenCaptureService(screenCaptureService);
-                _managementService?.EnablePluginFeature(_brushProvider.Instance, false);
+                RestartAmbilightFeature();
             }
+        }
+
+        private void SystemEventsOnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
+        {
+            switch (e.Mode)
+            {
+                case PowerModes.Suspend:
+                    _logger?.Debug("System suspend detected, suspending all screen captures");
+                    ScreenCaptureService?.SuspendAllCaptures();
+                    RequestImmediateRender();
+                    break;
+                case PowerModes.Resume:
+                    if (_brushProvider?.Instance == null || !_brushProvider.Instance.IsEnabled)
+                        _logger?.Debug("System resumed, but ambilight feature is disabled");
+                    else
+                    {
+                        _logger?.Debug("System resumed, restarting ambilight feature");
+                        RestartAmbilightFeature();
+                    }
+                    break;
+            }
+        }
+
+        private void DisplayStateMonitorOnDisplayStateChanged(object? sender, bool isDisplayOn)
+        {
+            if (isDisplayOn)
+            {
+                if (_brushProvider?.Instance == null || !_brushProvider.Instance.IsEnabled)
+                {
+                    _logger?.Debug("Display power restored, but ambilight feature is disabled");
+                    return;
+                }
+
+                _logger?.Debug("Display power restored, restarting ambilight feature");
+                RestartAmbilightFeature();
+                return;
+            }
+
+            _logger?.Debug("Display idle timeout detected, suspending all screen captures");
+            ScreenCaptureService?.SuspendAllCaptures();
+            RequestImmediateRender();
+        }
+
+        private void RestartAmbilightFeature()
+        {
+            if (_brushProvider?.Instance == null)
+                return;
+
+            _managementService?.DisablePluginFeature(_brushProvider.Instance, false);
+            ScreenCaptureService?.Dispose();
+            IScreenCaptureService screenCaptureService = CreateScreenCaptureService();
+            ScreenCaptureService = new AmbilightScreenCaptureService(screenCaptureService);
+            _managementService?.EnablePluginFeature(_brushProvider.Instance, false);
+            RequestImmediateRender();
+        }
+
+        private void RequestImmediateRender()
+        {
+            _renderService?.Surface.Update(true);
         }
 
         #endregion

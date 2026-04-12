@@ -51,6 +51,13 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         /// </summary>
         public bool HasCaptureError => _captureError;
 
+        /// <summary>
+        /// Indicates capture output should be suppressed and rendered as black.
+        /// </summary>
+        public bool ShouldOutputBlack => _suspended || _captureError;
+
+        public bool IsSuspended => _suspended;
+
         #endregion
 
         #region Events
@@ -86,6 +93,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         public void Resume()
         {
             _suspended = false;
+            _captureError = false;
             Logger.Debug("Capture resumed for {Display}", Display.DeviceName);
         }
 

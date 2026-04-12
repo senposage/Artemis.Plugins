@@ -60,7 +60,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         public override unsafe void Render(SKCanvas canvas, SKRect bounds, SKPaint paint)
         {
-            if (_captureZone == null) return;
+            if (ShouldRenderBlack())
+            {
+                RenderBlack(canvas, bounds);
+                return;
+            }
 
             try
             {
@@ -68,7 +72,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 using (_captureZone.Lock())
                 {
                     RefImage<ColorBGRA> image = _captureZone.GetRefImage<ColorBGRA>();
-                    if (image.Width == 0 || image.Height == 0) return;
+                    if (image.Width == 0 || image.Height == 0)
+                    {
+                        RenderBlack(canvas, bounds);
+                        return;
+                    }
 
                     if (properties.BlackBarDetectionTop || properties.BlackBarDetectionBottom || properties.BlackBarDetectionLeft || properties.BlackBarDetectionRight)
                         image = image.RemoveBlackBars(properties.BlackBarDetectionThreshold,
@@ -112,7 +120,23 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             catch (ObjectDisposedException)
             {
                 // Capture zone was disposed during a display change - safe to ignore
+                RenderBlack(canvas, bounds);
             }
+        }
+
+        private bool ShouldRenderBlack()
+        {
+            if (_captureZone == null || _display == null || _screenCaptureService == null)
+                return true;
+
+            IScreenCapture screenCapture = _screenCaptureService.GetScreenCapture(_display.Value);
+            return screenCapture is AmbilightScreenCapture ambilightCapture && ambilightCapture.ShouldOutputBlack;
+        }
+
+        private void RenderBlack(SKCanvas canvas, SKRect bounds)
+        {
+            _smoothedBitmap?.Erase(SKColors.Black);
+            canvas.DrawColor(SKColors.Black);
         }
 
         /// <summary>
