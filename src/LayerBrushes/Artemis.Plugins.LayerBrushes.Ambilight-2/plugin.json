@@ -1,0 +1,10 @@
+{
+  "Guid": "279ad4ce-3f4b-4118-b1b8-74e8c5806324",
+  "MinimumVersion": "1.2025.1222.3",
+  "Name": "Ambilight v2",
+  "Icon": "MonitorMultiple",
+  "Description": "Screen-Capturing to use the image currently shown on the display for a brush.",
+  "Version": "2.0.2.0",
+  "Main": "Artemis.Plugins.LayerBrushes.AmbilightV2.dll",
+  "Platforms": "Windows,Linux"
+}
