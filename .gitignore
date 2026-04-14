@@ -17,7 +17,8 @@ debug/
 bld/
 [Bb]in/
 [Oo]bj/
-
+.github\workflows\artemis-plugins-layerbrushes-ambilight.yml
+.github\*
 # Visual Studo 2015 cache/options directory
 .vs/
 

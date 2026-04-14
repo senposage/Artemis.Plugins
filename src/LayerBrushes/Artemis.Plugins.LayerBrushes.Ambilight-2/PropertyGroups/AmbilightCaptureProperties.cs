@@ -38,6 +38,17 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups
         public LayerProperty<float> ColorTemperature { get; set; }
         public IntLayerProperty BlackPoint { get; set; }
         public IntLayerProperty WhitePoint { get; set; }
+        /// <summary>
+        /// Auto-exposure strength 0–1. At > 0 the render path scales output brightness
+        /// inversely with scene luminance so a full-white frame does not blast at 100%.
+        /// </summary>
+        public LayerProperty<float> AutoExposureStrength { get; set; }
+
+        /// <summary>
+        /// Highlight compression strength 0–1.  Applies a per-channel smooth roll-off above a
+        /// knee point so bright/white content is dimmed without touching darks or midtones.
+        /// </summary>
+        public LayerProperty<float> HighlightCompression { get; set; }
 
         // Smoothing
         public LayerProperty<float> SmoothingFactor { get; set; }
@@ -56,6 +67,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups
             ColorTemperature.DefaultValue = 0f;
             BlackPoint.DefaultValue = 0;
             WhitePoint.DefaultValue = 255;
+            AutoExposureStrength.DefaultValue = 0f;
+            HighlightCompression.DefaultValue = 0f;
             SmoothingFactor.DefaultValue = 0f;
             FrameSkip.DefaultValue = 0;
             CaptureFpsLimit.DefaultValue = 30;

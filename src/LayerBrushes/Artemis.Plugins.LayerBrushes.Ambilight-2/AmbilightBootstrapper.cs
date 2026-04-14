@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Threading;
 using Artemis.Core;
 using Artemis.Core.Services;
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
@@ -16,6 +17,13 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         private IRenderService? _renderService;
         private PluginFeatureInfo? _brushProvider;
         private WindowsDisplayStateMonitor? _displayStateMonitor;
+
+        // Debounce DisplaySettingsChanged: Windows fires multiple events as it works through a
+        // mode switch (resolution change, topology reconfigure, power state). Waiting 5 seconds
+        // ensures all events have fired and the display state has fully settled before we restart
+        // the capture service and run DDC checks on the new instances.
+        private Timer? _displaySettledTimer;
+        private const int DisplaySettledDelayMs = 10000;
 
         #region Properties & Fields
 
@@ -48,6 +56,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         public override void OnPluginDisabled(Plugin plugin)
         {
+            _displaySettledTimer?.Dispose();
+            _displaySettledTimer = null;
+
             if (_displayStateMonitor != null)
             {
                 _displayStateMonitor.DisplayStateChanged -= DisplayStateMonitorOnDisplayStateChanged;
@@ -91,8 +102,6 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         private void SystemEventsOnDisplaySettingsChanging(object? sender, EventArgs e)
         {
-            // Suspend all captures BEFORE the display change happens.
-            // This stops the DX11 capture loop from calling into the driver with stale resources.
             _logger?.Debug("Display settings changing, suspending all screen captures");
             ScreenCaptureService?.SuspendAllCaptures();
             RequestImmediateRender();
@@ -101,12 +110,21 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         private void SystemEventsOnDisplaySettingsChanged(object? sender, EventArgs e)
         {
             if (_brushProvider?.Instance == null || !_brushProvider.Instance.IsEnabled)
-                _logger?.Debug("Display settings changed, but ambilight feature is disabled");
-            else
             {
-                _logger?.Debug("Display settings changed, restarting ambilight feature");
-                RestartAmbilightFeature();
+                _logger?.Debug("Display settings changed, but ambilight feature is disabled");
+                return;
             }
+
+            // Windows fires multiple DisplaySettingsChanged events during a mode switch
+            // (one per stage: topology, resolution, power state). Debounce by resetting
+            // the timer on every event — restart only fires once things have settled.
+            _logger?.Debug("Display settings changed, waiting {Delay}ms for display state to settle", DisplaySettledDelayMs);
+            _displaySettledTimer?.Dispose();
+            _displaySettledTimer = new Timer(_ =>
+            {
+                _logger?.Debug("Display state settled, restarting ambilight feature");
+                RestartAmbilightFeature();
+            }, null, DisplaySettledDelayMs, Timeout.Infinite);
         }
 
         private void SystemEventsOnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
@@ -130,17 +148,31 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
         }
 
-        private void DisplayStateMonitorOnDisplayStateChanged(object? sender, bool isDisplayOn)
+        private void DisplayStateMonitorOnDisplayStateChanged(object? sender, int displayState)
         {
-            if (isDisplayOn)
+            // displayState: 0 = off, 1 = on, 2 = dimmed
+            _logger?.Debug("GUID_CONSOLE_DISPLAY_STATE = {State}", displayState);
+
+            if (displayState != 0)
             {
-                _logger?.Debug("Display power restored, resuming screen captures");
-                ScreenCaptureService?.ResumeAllCaptures();
-                RequestImmediateRender();
+                // Do NOT resume here.
+                //
+                // When a secondary DP monitor is physically powered off, Windows:
+                //   1. fires displayState=0  → we suspend (correct)
+                //   2. fires displayState=1  → the *remaining* primary just became active
+                //
+                // Calling ResumeAllCaptures() at step 2 clears _suspended on ALL captures
+                // (including the now-off secondary) before the DDC poll has had a chance to
+                // set _displayOff=true on that capture. The secondary LED then flashes back
+                // on for up to 5 seconds until the next DDC tick.
+                //
+                // Fix: ignore display-on events here entirely. AmbilightScreenCapture's DDC
+                // poll (CheckDisplayPowerState) clears _suspended automatically when it
+                // confirms a display is On.
                 return;
             }
 
-            _logger?.Debug("Display idle timeout detected, suspending all screen captures");
+            _logger?.Debug("Display idle/power-off detected, suspending all screen captures");
             ScreenCaptureService?.SuspendAllCaptures();
             RequestImmediateRender();
         }
@@ -149,6 +181,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         {
             if (_brushProvider?.Instance == null)
                 return;
+
+            // Snapshot the current suspended/off state of every capture BEFORE disposal.
+            // New instances will inherit this so they don't trust a potentially-stale DDC "On"
+            // from a headless DP display.  The DDC poll clears it once the display is confirmed on.
+            AmbilightScreenCapture.PersistDisplayOffState();
 
             _managementService?.DisablePluginFeature(_brushProvider.Instance, false);
             ScreenCaptureService?.Dispose();

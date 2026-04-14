@@ -31,25 +31,6 @@ internal static class MonitorPowerState
     }
 
     /// <summary>
-    /// Returns the physical monitor description string (e.g. "HP Z27 HDMI") or null if unavailable.
-    /// </summary>
-    public static string? QueryMonitorDescription(string displayDeviceName)
-    {
-        IntPtr hMonitor = GetMonitorHandle(displayDeviceName);
-        if (hMonitor == IntPtr.Zero) return null;
-
-        if (!GetNumberOfPhysicalMonitorsFromHMONITOR(hMonitor, out uint count) || count == 0)
-            return null;
-
-        var monitors = new PHYSICAL_MONITOR[count];
-        if (!GetPhysicalMonitorsFromHMONITOR(hMonitor, count, monitors))
-            return null;
-
-        try   { return monitors[0].szPhysicalMonitorDescription; }
-        finally { DestroyPhysicalMonitors(count, monitors); }
-    }
-
-    /// <summary>
     /// Queries the power state of the physical monitor behind the given display adapter.
     /// </summary>
     public static PowerState QueryPowerState(string displayDeviceName)

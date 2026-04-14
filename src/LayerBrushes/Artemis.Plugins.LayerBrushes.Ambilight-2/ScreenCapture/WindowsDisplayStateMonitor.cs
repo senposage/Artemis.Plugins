@@ -22,7 +22,8 @@ internal sealed class WindowsDisplayStateMonitor : IDisposable
     private uint _threadId;
     private bool _disposed;
 
-    public event EventHandler<bool>? DisplayStateChanged;
+    /// <summary>Raw GUID_CONSOLE_DISPLAY_STATE value: 0=off, 1=on, 2=dimmed.</summary>
+    public event EventHandler<int>? DisplayStateChanged;
 
     public WindowsDisplayStateMonitor()
     {
@@ -117,8 +118,7 @@ internal sealed class WindowsDisplayStateMonitor : IDisposable
             {
                 IntPtr dataPtr = IntPtr.Add(lParam, Marshal.OffsetOf<POWERBROADCAST_SETTING>(nameof(POWERBROADCAST_SETTING.Data)).ToInt32());
                 int displayState = Marshal.ReadInt32(dataPtr);
-                bool isDisplayOn = displayState != 0;
-                DisplayStateChanged?.Invoke(this, isDisplayOn);
+                DisplayStateChanged?.Invoke(this, displayState);
             }
         }
         else if (msg == WM_CLOSE)

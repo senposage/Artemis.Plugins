@@ -38,7 +38,13 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         private int _zoneCount = 0;
         private volatile bool _captureError;
         private volatile bool _suspended;
+        private volatile bool _displayOff;
         private volatile int _fpsLimit;
+
+        // DDC/CI per-monitor power state detection
+        private bool _ddcEverWorked;
+        private int _ddcConsecutiveFailures;
+        private const int DDC_MAX_INITIAL_FAILURES = 3;
 
         private Task? _updateTask;
         private CancellationTokenSource? _cancellationTokenSource;
@@ -54,7 +60,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         /// <summary>
         /// Indicates capture output should be suppressed and rendered as black.
         /// </summary>
-        public bool ShouldOutputBlack => _suspended || _captureError;
+        public bool ShouldOutputBlack => _suspended || _captureError || _displayOff;
 
         public bool IsSuspended => _suspended;
 
@@ -90,10 +96,12 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             Logger.Debug("Capture suspended for {Display}", Display.DeviceName);
         }
 
-        public void Resume()
+        public void Resume(bool clearDisplayOffState = false)
         {
             _suspended = false;
             _captureError = false;
+            if (clearDisplayOffState)
+                _displayOff = false;
             Logger.Debug("Capture resumed for {Display}", Display.DeviceName);
         }
 
@@ -115,6 +123,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         {
             int consecutiveErrors = 0;
             var stopwatch = Stopwatch.StartNew();
+            var powerCheckTimer = Stopwatch.StartNew();
+            bool firstPowerCheck = true;
+
             while (true)
             {
                 _cancellationToken.ThrowIfCancellationRequested();
@@ -123,6 +134,21 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 if (_suspended)
                 {
                     Thread.Sleep(50);
+                    continue;
+                }
+
+                // Per-monitor DPMS check via DDC/CI (every ~2s, immediate on first iteration)
+                if (OperatingSystem.IsWindows() && (firstPowerCheck || powerCheckTimer.ElapsedMilliseconds >= 2000))
+                {
+                    firstPowerCheck = false;
+                    powerCheckTimer.Restart();
+                    CheckDisplayPowerState();
+                }
+
+                // When display is DPMS-off, sleep until next power check
+                if (_displayOff)
+                {
+                    Thread.Sleep(200);
                     continue;
                 }
 
@@ -179,6 +205,68 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                         }
                     }
                 }
+            }
+        }
+
+        /// <summary>
+        /// Queries the physical monitor's power state and updates <see cref="_displayOff"/>.
+        /// Two detection layers:
+        /// 1. HMONITOR presence — if the monitor vanishes from EnumDisplayMonitors, it's off/disconnected.
+        /// 2. DDC/CI VCP 0xD6 — detects DPMS standby/suspend/off per physical monitor.
+        /// Falls back to the system-wide GUID_CONSOLE_DISPLAY_STATE handler when both are unavailable.
+        /// </summary>
+        private void CheckDisplayPowerState()
+        {
+            // If DDC never worked and we've exhausted initial probes, only check HMONITOR presence.
+            bool ddcExhausted = !_ddcEverWorked && _ddcConsecutiveFailures >= DDC_MAX_INITIAL_FAILURES;
+
+            MonitorPowerState.PowerState state = MonitorPowerState.QueryPowerState(Display.DeviceName);
+
+            switch (state)
+            {
+                case MonitorPowerState.PowerState.On:
+                    _ddcEverWorked = true;
+                    _ddcConsecutiveFailures = 0;
+                    if (_displayOff)
+                    {
+                        _displayOff = false;
+                        Logger.Debug("Display power restored via DDC/CI for {Display}", Display.DeviceName);
+                    }
+                    break;
+
+                case MonitorPowerState.PowerState.Off:
+                    _ddcEverWorked = true;
+                    _ddcConsecutiveFailures = 0;
+                    if (!_displayOff)
+                    {
+                        _displayOff = true;
+                        Logger.Debug("Display DPMS off detected via DDC/CI for {Display}", Display.DeviceName);
+                    }
+                    break;
+
+                case MonitorPowerState.PowerState.NotPresent:
+                    // Monitor disappeared from EnumDisplayMonitors — disconnected or fully powered off
+                    if (!_displayOff)
+                    {
+                        _displayOff = true;
+                        Logger.Debug("Monitor not present for {Display}, treating as display off", Display.DeviceName);
+                    }
+                    break;
+
+                case MonitorPowerState.PowerState.DdcUnavailable:
+                    _ddcConsecutiveFailures++;
+
+                    // If DDC previously worked but now fails, the monitor likely entered
+                    // deep power-off (some monitors stop responding to I2C entirely)
+                    if (_ddcEverWorked && !_displayOff)
+                    {
+                        _displayOff = true;
+                        Logger.Debug("DDC/CI unresponsive for {Display}, treating as display off", Display.DeviceName);
+                    }
+
+                    if (!_ddcEverWorked && _ddcConsecutiveFailures == DDC_MAX_INITIAL_FAILURES)
+                        Logger.Debug("DDC/CI not available for {Display}, using system-wide detection only", Display.DeviceName);
+                    break;
             }
         }
 

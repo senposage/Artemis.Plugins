@@ -54,6 +54,8 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     private int _colorTemperature;
     private int _blackPoint;
     private int _whitePoint;
+    private int _autoExposureStrength;
+    private int _highlightCompression;
 
     // Smoothing & performance
     private int _smoothingFactor;
@@ -222,6 +224,18 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         set => RaiseAndSetIfChanged(ref _whitePoint, value);
     }
 
+    public int AutoExposureStrength
+    {
+        get => _autoExposureStrength;
+        set => RaiseAndSetIfChanged(ref _autoExposureStrength, value);
+    }
+
+    public int HighlightCompression
+    {
+        get => _highlightCompression;
+        set => RaiseAndSetIfChanged(ref _highlightCompression, value);
+    }
+
     // Smoothing & performance
     public int SmoothingFactor
     {
@@ -272,6 +286,8 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         ColorTemperature = (int)(6500f - _properties.ColorTemperature.CurrentValue * 5500f);
         BlackPoint = _properties.BlackPoint;
         WhitePoint = _properties.WhitePoint;
+        AutoExposureStrength = (int)(_properties.AutoExposureStrength.CurrentValue * 100f);
+        HighlightCompression = (int)(_properties.HighlightCompression.CurrentValue * 100f);
         SmoothingFactor = (int)(_properties.SmoothingFactor.CurrentValue * 100f);
         FrameSkip = _properties.FrameSkip;
         CaptureFpsLimit = _properties.CaptureFpsLimit;
@@ -308,6 +324,8 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         _properties.ColorTemperature.SetCurrentValue((6500f - ColorTemperature) / 5500f);
         _properties.BlackPoint.SetCurrentValue(BlackPoint);
         _properties.WhitePoint.SetCurrentValue(WhitePoint);
+        _properties.AutoExposureStrength.SetCurrentValue(AutoExposureStrength / 100f);
+        _properties.HighlightCompression.SetCurrentValue(HighlightCompression / 100f);
         _properties.SmoothingFactor.SetCurrentValue(SmoothingFactor / 100f);
         _properties.FrameSkip.SetCurrentValue(FrameSkip);
         _properties.CaptureFpsLimit.SetCurrentValue(CaptureFpsLimit);

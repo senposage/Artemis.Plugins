@@ -64,6 +64,24 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             }
         }
 
+        /// <summary>
+        /// Resumes all suspended captures. Lighter than a full feature restart — keeps
+        /// existing WGC sessions alive.  Does NOT clear per-monitor <c>_displayOff</c>
+        /// state so that individual monitors detected as DPMS-off stay dark until the
+        /// DDC/CI poll confirms they are back on.
+        /// </summary>
+        public void ResumeAllCaptures()
+        {
+            lock (_screenCaptures)
+            {
+                foreach (IScreenCapture screenCapture in _screenCaptures.Values)
+                {
+                    if (screenCapture is AmbilightScreenCapture ambilightCapture)
+                        ambilightCapture.Resume(clearDisplayOffState: false);
+                }
+            }
+        }
+
         public void Dispose()
         {
             // Suspend first to stop DX11 calls before disposing resources

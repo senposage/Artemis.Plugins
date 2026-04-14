@@ -134,14 +134,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         {
             if (isDisplayOn)
             {
-                if (_brushProvider?.Instance == null || !_brushProvider.Instance.IsEnabled)
-                {
-                    _logger?.Debug("Display power restored, but ambilight feature is disabled");
-                    return;
-                }
-
-                _logger?.Debug("Display power restored, restarting ambilight feature");
-                RestartAmbilightFeature();
+                _logger?.Debug("Display power restored, resuming screen captures");
+                ScreenCaptureService?.ResumeAllCaptures();
+                RequestImmediateRender();
                 return;
             }
 

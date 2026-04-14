@@ -30,13 +30,20 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         // Cached color adjustment state — avoids recreating GPU resources every frame
         private SKPaint? _colorPaint;
-        private SKColorFilter? _cachedColorFilter;
+        private SKColorFilter? _cachedColorFilter;   // final filter applied to paint (may be composed)
+        private SKColorFilter? _cachedHighlightFilter; // LUT filter, rebuilt only when compression changes
         private float _lastBrightness = float.NaN;
         private float _lastContrast = float.NaN;
         private float _lastSaturation = float.NaN;
         private float _lastTemperature = float.NaN;
         private int _lastBlackPoint = -1;
         private int _lastWhitePoint = -1;
+        private float _lastExposureScale = float.NaN;
+        private float _lastHighlightCompression = float.NaN;
+
+        // Auto-exposure: smoothed scale applied on top of the color matrix.
+        // 1.0 = no reduction, approaches 0 for very bright scenes at high strength.
+        private float _exposureScale = 1f;
 
         #endregion
 
@@ -83,6 +90,22 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                                                       properties.BlackBarDetectionTop, properties.BlackBarDetectionBottom,
                                                       properties.BlackBarDetectionLeft, properties.BlackBarDetectionRight);
 
+                    // Auto-exposure: compute average scene luminance and smooth a scale factor.
+                    // fast dim (rate 0.10) so a flash is absorbed quickly;
+                    // slow recover (rate 0.02) so the LEDs don't strobe when content changes.
+                    float autoExpStrength = properties.AutoExposureStrength.CurrentValue;
+                    if (autoExpStrength > 0f)
+                    {
+                        float avgLum = ComputeAverageLuminance(image);
+                        float target = 1f / (1f + avgLum * autoExpStrength * 4f);
+                        float rate = target < _exposureScale ? 0.10f : 0.02f;
+                        _exposureScale += (target - _exposureScale) * rate;
+                    }
+                    else
+                    {
+                        _exposureScale = 1f;
+                    }
+
                     fixed (byte* img = image)
                     {
                         using SKImage skImage = SKImage.FromPixels(new SKImageInfo(image.Width, image.Height, SKColorType.Bgra8888, SKAlphaType.Opaque), (nint)img, image.RawStride);
@@ -108,11 +131,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                                 blendCanvas.DrawImage(skImage, 0, 0, blendPaint);
                             }
 
-                            DrawSmoothedWithColorAdjustments(canvas, bounds, paint, properties);
+                            DrawSmoothedWithColorAdjustments(canvas, bounds, paint, properties, _exposureScale);
                         }
                         else
                         {
-                            DrawWithColorAdjustments(canvas, skImage, bounds, paint, properties);
+                            DrawWithColorAdjustments(canvas, skImage, bounds, paint, properties, _exposureScale);
                         }
                     }
                 }
@@ -142,15 +165,15 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         /// <summary>
         /// Draws from the smoothed bitmap without creating an intermediate SKImage GPU texture copy.
         /// </summary>
-        private void DrawSmoothedWithColorAdjustments(SKCanvas canvas, SKRect bounds, SKPaint paint, AmbilightCaptureProperties props)
+        private void DrawSmoothedWithColorAdjustments(SKCanvas canvas, SKRect bounds, SKPaint paint, AmbilightCaptureProperties props, float exposureScale)
         {
-            SKPaint effectivePaint = GetColorAdjustedPaint(paint, props);
+            SKPaint effectivePaint = GetColorAdjustedPaint(paint, props, exposureScale);
             canvas.DrawBitmap(_smoothedBitmap!, bounds, effectivePaint);
         }
 
-        private void DrawWithColorAdjustments(SKCanvas canvas, SKImage image, SKRect bounds, SKPaint paint, AmbilightCaptureProperties props)
+        private void DrawWithColorAdjustments(SKCanvas canvas, SKImage image, SKRect bounds, SKPaint paint, AmbilightCaptureProperties props, float exposureScale)
         {
-            SKPaint effectivePaint = GetColorAdjustedPaint(paint, props);
+            SKPaint effectivePaint = GetColorAdjustedPaint(paint, props, exposureScale);
             canvas.DrawImage(image, bounds, effectivePaint);
         }
 
@@ -158,7 +181,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         /// Returns a paint with the cached color filter applied, or the original paint if no adjustments are needed.
         /// The color filter is only rebuilt when parameters actually change.
         /// </summary>
-        private SKPaint GetColorAdjustedPaint(SKPaint paint, AmbilightCaptureProperties props)
+        private SKPaint GetColorAdjustedPaint(SKPaint paint, AmbilightCaptureProperties props, float exposureScale)
         {
             float brightness = props.Brightness.CurrentValue;
             float contrast = props.Contrast.CurrentValue;
@@ -166,49 +189,75 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             float temperature = props.ColorTemperature.CurrentValue;
             int blackPoint = Math.Clamp((int)props.BlackPoint, 0, 50);
             int whitePoint = Math.Clamp((int)props.WhitePoint, 200, 255);
+            float highlight = Math.Clamp(props.HighlightCompression.CurrentValue, 0f, 1f);
 
-            bool hasColorAdjustment = brightness != 0f || contrast != 0f || saturation != 0f ||
-                                      temperature != 0f || blackPoint != 0 || whitePoint != 255;
+            bool hasAdjustment = brightness != 0f || contrast != 0f || saturation != 0f ||
+                                  temperature != 0f || blackPoint != 0 || whitePoint != 255 ||
+                                  exposureScale < 0.999f || highlight > 0.001f;
 
-            if (!hasColorAdjustment)
+            if (!hasAdjustment)
             {
-                // Dispose cached resources when adjustments are turned off
                 if (_cachedColorFilter != null)
                 {
-                    _cachedColorFilter.Dispose();
-                    _cachedColorFilter = null;
-                    _colorPaint?.Dispose();
-                    _colorPaint = null;
+                    _cachedHighlightFilter?.Dispose(); _cachedHighlightFilter = null;
+                    _cachedColorFilter.Dispose();      _cachedColorFilter = null;
+                    _colorPaint?.Dispose();            _colorPaint = null;
                     _lastBrightness = float.NaN;
+                    _lastExposureScale = float.NaN;
+                    _lastHighlightCompression = float.NaN;
                 }
                 return paint;
             }
 
-            // Only rebuild the color filter when parameters have actually changed
-            if (brightness != _lastBrightness || contrast != _lastContrast || saturation != _lastSaturation ||
-                temperature != _lastTemperature || blackPoint != _lastBlackPoint || whitePoint != _lastWhitePoint)
-            {
-                _lastBrightness = brightness;
-                _lastContrast = contrast;
-                _lastSaturation = saturation;
-                _lastTemperature = temperature;
-                _lastBlackPoint = blackPoint;
-                _lastWhitePoint = whitePoint;
+            bool highlightChanged = Math.Abs(highlight - _lastHighlightCompression) > 0.002f;
+            bool matrixChanged   = brightness != _lastBrightness || contrast != _lastContrast ||
+                                   saturation != _lastSaturation || temperature != _lastTemperature ||
+                                   blackPoint != _lastBlackPoint || whitePoint != _lastWhitePoint ||
+                                   Math.Abs(exposureScale - _lastExposureScale) > 0.002f;
 
+            if (highlightChanged || matrixChanged)
+            {
+                // Rebuild the highlight LUT only when the compression value changes
+                if (highlightChanged)
+                {
+                    _lastHighlightCompression = highlight;
+                    _cachedHighlightFilter?.Dispose();
+                    _cachedHighlightFilter = highlight > 0.001f ? BuildHighlightFilter(highlight) : null;
+                }
+
+                if (matrixChanged)
+                {
+                    _lastBrightness = brightness; _lastContrast   = contrast;
+                    _lastSaturation = saturation; _lastTemperature = temperature;
+                    _lastBlackPoint = blackPoint; _lastWhitePoint  = whitePoint;
+                    _lastExposureScale = exposureScale;
+                }
+
+                // Rebuild the final composed filter (highlight inner → color matrix outer)
                 _cachedColorFilter?.Dispose();
                 Span<float> matrix = stackalloc float[20];
-                BuildColorMatrix(matrix, brightness, contrast, saturation, temperature, blackPoint, whitePoint);
-                _cachedColorFilter = SKColorFilter.CreateColorMatrix(matrix.ToArray());
+                BuildColorMatrix(matrix, brightness, contrast, saturation, temperature, blackPoint, whitePoint, exposureScale);
+                SKColorFilter matrixFilter = SKColorFilter.CreateColorMatrix(matrix.ToArray());
+
+                if (_cachedHighlightFilter != null)
+                {
+                    // Highlight compression runs first (on raw pixel values), color adjustments on top
+                    _cachedColorFilter = SKColorFilter.CreateCompose(matrixFilter, _cachedHighlightFilter);
+                    matrixFilter.Dispose();
+                }
+                else
+                {
+                    _cachedColorFilter = matrixFilter;
+                }
             }
 
-            // Reuse the paint — clone once, then just update the filter
             if (_colorPaint == null)
                 _colorPaint = paint.Clone();
             _colorPaint.ColorFilter = _cachedColorFilter;
             return _colorPaint;
         }
 
-        private static void BuildColorMatrix(Span<float> m, float brightness, float contrast, float saturation, float temperature, int blackPoint, int whitePoint)
+        private static void BuildColorMatrix(Span<float> m, float brightness, float contrast, float saturation, float temperature, int blackPoint, int whitePoint, float exposureScale)
         {
             // Identity
             m.Clear();
@@ -272,6 +321,75 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 m[0] *= scale; m[4] += offset;
                 m[6] *= scale; m[9] += offset;
                 m[12] *= scale; m[14] += offset;
+            }
+
+            // Auto-exposure: scale all three RGB output rows uniformly.
+            // Applied last so it doesn't interact with the other adjustments.
+            if (exposureScale < 0.999f)
+            {
+                for (int i = 0; i < 5; i++)
+                {
+                    m[i]      *= exposureScale; // R row
+                    m[5 + i]  *= exposureScale; // G row
+                    m[10 + i] *= exposureScale; // B row
+                }
+            }
+        }
+
+        /// <summary>
+        /// Builds a per-channel highlight-compression LUT as a Skia color filter.
+        ///
+        /// Content below the knee passes through unchanged.  Above the knee the output
+        /// is smoothly compressed toward a ceiling using a smoothstep curve, so darks and
+        /// midtones are unaffected while bright/white values are rolled off.
+        ///
+        /// strength=0   → identity (no-op, never actually called)
+        /// strength=0.5 → ceiling≈80 %, knee≈68 %  — modest highlight roll-off
+        /// strength=1.0 → ceiling≈60 %, knee≈54 %  — aggressive roll-off for flash-bang scenes
+        /// </summary>
+        private static SKColorFilter BuildHighlightFilter(float strength)
+        {
+            // ceiling: maximum output value — scales from 1.0 (no effect) down to 0.6
+            float ceiling = 1f - strength * 0.4f;
+            // knee: where compression starts — tracks just below ceiling, never above 0.75
+            float knee    = Math.Min(0.75f, ceiling - 0.01f);
+
+            var table = new byte[256];
+            for (int i = 0; i < 256; i++)
+            {
+                float x      = i / 255f;
+                float output = x <= knee
+                    ? x
+                    : knee + (ceiling - knee) * SmoothStep((x - knee) / (1f - knee));
+                table[i] = (byte)Math.Clamp((int)(output * 255f + 0.5f), 0, 255);
+            }
+            // Apply the same curve to R, G, B; leave alpha untouched
+            return SKColorFilter.CreateTable(null, table, table, table);
+        }
+
+        private static float SmoothStep(float t) => t * t * (3f - 2f * t);
+
+        /// <summary>
+        /// Returns the average BT.709 luminance of the image, normalised to 0–1.
+        /// Operates on the already-downscaled buffer so pixel count is small (typically ~500 px).
+        /// </summary>
+        private static unsafe float ComputeAverageLuminance(RefImage<ColorBGRA> image)
+        {
+            if (image.Width == 0 || image.Height == 0) return 0f;
+            fixed (byte* ptr = image)
+            {
+                long sum = 0;
+                int stride = image.RawStride;
+                for (int y = 0; y < image.Height; y++)
+                {
+                    byte* row = ptr + y * stride;
+                    for (int x = 0; x < image.Width; x++)
+                    {
+                        byte* p = row + x * 4; // BGRA: p[0]=B, p[1]=G, p[2]=R
+                        sum += p[2] * 2126L + p[1] * 7152L + p[0] * 722L;
+                    }
+                }
+                return (float)(sum / ((double)image.Width * image.Height * 10000.0 * 255.0));
             }
         }
 
@@ -369,10 +487,15 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             RemoveCaptureZone();
             _smoothedBitmap?.Dispose();
             _smoothedBitmap = null;
+            _cachedHighlightFilter?.Dispose();
+            _cachedHighlightFilter = null;
             _cachedColorFilter?.Dispose();
             _cachedColorFilter = null;
             _colorPaint?.Dispose();
             _colorPaint = null;
+            _exposureScale = 1f;
+            _lastExposureScale = float.NaN;
+            _lastHighlightCompression = float.NaN;
         }
 
         #endregion
