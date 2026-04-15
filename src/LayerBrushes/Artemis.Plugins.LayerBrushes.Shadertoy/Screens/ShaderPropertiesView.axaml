@@ -1,0 +1,317 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:attachedProperties="clr-namespace:Artemis.UI.Shared.AttachedProperties;assembly=Artemis.UI.Shared"
+             xmlns:controls="clr-namespace:FluentAvalonia.UI.Controls;assembly=FluentAvalonia"
+             xmlns:screens="clr-namespace:Artemis.Plugins.LayerBrushes.Shadertoy.Screens"
+             mc:Ignorable="d" d:DesignWidth="1300" d:DesignHeight="750"
+             x:Class="Artemis.Plugins.LayerBrushes.Shadertoy.Screens.ShaderPropertiesView"
+             x:DataType="screens:ShaderPropertiesViewModel">
+
+  <Grid ColumnDefinitions="*,*" Margin="15">
+
+    <!-- ====== LEFT: controls + editor ====== -->
+    <Border Grid.Column="0" Margin="0,0,10,0" Classes="card">
+      <Grid RowDefinitions="Auto,Auto,Auto,Auto,*">
+
+        <!-- Row 0: Width / Height / MaxFps / Audio checkbox -->
+        <Grid Grid.Row="0" ColumnDefinitions="*,*,*,Auto">
+          <StackPanel Grid.Column="0">
+            <Label>Width</Label>
+            <controls:NumberBox Margin="5,0,5,5"
+                                Value="{CompiledBinding Width}"
+                                attachedProperties:NumberBoxAssist.SuffixText="px"
+                                HorizontalAlignment="Stretch"
+                                Minimum="1" Maximum="2048"
+                                AcceptsExpression="True"
+                                ValidationMode="InvalidInputOverwritten"
+                                LostFocus="InputFinished" />
+          </StackPanel>
+          <StackPanel Grid.Column="1">
+            <Label>Height</Label>
+            <controls:NumberBox Margin="5,0,5,5"
+                                Value="{CompiledBinding Height}"
+                                attachedProperties:NumberBoxAssist.SuffixText="px"
+                                HorizontalAlignment="Stretch"
+                                Minimum="1" Maximum="2048"
+                                AcceptsExpression="True"
+                                ValidationMode="InvalidInputOverwritten"
+                                LostFocus="InputFinished" />
+          </StackPanel>
+          <StackPanel Grid.Column="2">
+            <Label>Max FPS</Label>
+            <controls:NumberBox Margin="5,0,5,5"
+                                Value="{CompiledBinding MaxFps}"
+                                attachedProperties:NumberBoxAssist.SuffixText="fps"
+                                HorizontalAlignment="Stretch"
+                                Minimum="1" Maximum="120"
+                                AcceptsExpression="True"
+                                ValidationMode="InvalidInputOverwritten"
+                                LostFocus="InputFinished" />
+          </StackPanel>
+          <StackPanel Grid.Column="3" Margin="8,18,5,5" VerticalAlignment="Top" Spacing="4">
+            <CheckBox IsChecked="{CompiledBinding EnableAudio}"
+                      Click="InputFinished">Audio</CheckBox>
+            <CheckBox IsChecked="{CompiledBinding CubicResize}"
+                      Click="InputFinished">Cubic resize</CheckBox>
+          </StackPanel>
+        </Grid>
+
+        <!-- Row 1: Audio settings row -->
+        <Grid Grid.Row="1" Margin="5,4,5,0" ColumnDefinitions="*,*,*,Auto,Auto">
+          <!-- dB Floor -->
+          <StackPanel Grid.Column="0" Margin="0,0,8,0">
+            <Grid ColumnDefinitions="Auto,*">
+              <TextBlock Grid.Column="0" FontSize="11" VerticalAlignment="Center">dB Floor</TextBlock>
+              <TextBlock Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center"
+                         Foreground="Gray" FontSize="11"
+                         Text="{CompiledBinding AudioDbFloor, StringFormat='{}{0:F0} dB'}" />
+            </Grid>
+            <Slider Minimum="-80" Maximum="-10"
+                    Value="{CompiledBinding AudioDbFloor}"
+                    TickFrequency="5" IsSnapToTickEnabled="True"
+                    PointerCaptureLost="InputFinished" />
+          </StackPanel>
+          <!-- Attack -->
+          <StackPanel Grid.Column="1" Margin="0,0,8,0">
+            <Grid ColumnDefinitions="Auto,*">
+              <TextBlock Grid.Column="0" FontSize="11" VerticalAlignment="Center">Attack</TextBlock>
+              <TextBlock Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center"
+                         Foreground="Gray" FontSize="11"
+                         Text="{CompiledBinding AudioAttack, StringFormat='{}{0:P0}'}" />
+            </Grid>
+            <Slider Minimum="0" Maximum="0.99"
+                    Value="{CompiledBinding AudioAttack}"
+                    TickFrequency="0.05" IsSnapToTickEnabled="True"
+                    PointerCaptureLost="InputFinished" />
+          </StackPanel>
+          <!-- Decay -->
+          <StackPanel Grid.Column="2" Margin="0,0,8,0">
+            <Grid ColumnDefinitions="Auto,*">
+              <TextBlock Grid.Column="0" FontSize="11" VerticalAlignment="Center">Decay</TextBlock>
+              <TextBlock Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center"
+                         Foreground="Gray" FontSize="11"
+                         Text="{CompiledBinding AudioSmoothing, StringFormat='{}{0:P0}'}" />
+            </Grid>
+            <Slider Minimum="0" Maximum="0.99"
+                    Value="{CompiledBinding AudioSmoothing}"
+                    TickFrequency="0.05" IsSnapToTickEnabled="True"
+                    PointerCaptureLost="InputFinished" />
+          </StackPanel>
+          <!-- Spectrum mode -->
+          <StackPanel Grid.Column="3" Margin="0,0,8,0" MinWidth="130">
+            <TextBlock FontSize="11" Margin="0,0,0,2">Spectrum</TextBlock>
+            <ComboBox HorizontalAlignment="Stretch"
+                      SelectedIndex="{CompiledBinding AudioSpectrumMode}"
+                      SelectionChanged="InputFinished">
+              <ComboBoxItem>Max (log)</ComboBoxItem>
+              <ComboBoxItem>Average (log)</ComboBoxItem>
+              <ComboBoxItem>Linear</ComboBoxItem>
+            </ComboBox>
+          </StackPanel>
+          <!-- Freq range (hidden in Linear mode) -->
+          <StackPanel Grid.Column="4" MinWidth="200"
+                      IsVisible="{CompiledBinding AudioFreqRangeVisible}">
+            <TextBlock FontSize="11" Margin="0,0,0,2">Freq range (Hz)</TextBlock>
+            <Grid ColumnDefinitions="*,Auto,*">
+              <controls:NumberBox Grid.Column="0"
+                                  Value="{CompiledBinding AudioMinFreq}"
+                                  Minimum="1" Maximum="19999"
+                                  ValidationMode="InvalidInputOverwritten"
+                                  LostFocus="InputFinished" />
+              <TextBlock Grid.Column="1" VerticalAlignment="Center" Margin="4,0">–</TextBlock>
+              <controls:NumberBox Grid.Column="2"
+                                  Value="{CompiledBinding AudioMaxFreq}"
+                                  Minimum="100" Maximum="22050"
+                                  ValidationMode="InvalidInputOverwritten"
+                                  LostFocus="InputFinished" />
+            </Grid>
+          </StackPanel>
+        </Grid>
+
+        <!-- Row 2: Preset library -->
+        <StackPanel Grid.Row="2" Margin="5,6,5,0">
+          <Label>Presets</Label>
+          <Grid ColumnDefinitions="*,Auto">
+            <ComboBox Grid.Column="0"
+                      HorizontalAlignment="Stretch"
+                      ItemsSource="{CompiledBinding PresetNames}"
+                      SelectedItem="{CompiledBinding SelectedPreset}"
+                      PlaceholderText="Select a preset…" />
+            <Button Grid.Column="1" Margin="4,0,0,0" Click="DeletePreset_Click">Delete</Button>
+          </Grid>
+          <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
+            <TextBox Grid.Column="0"
+                     Watermark="Preset name…"
+                     Text="{CompiledBinding SavePresetName}" />
+            <Button Grid.Column="1" Margin="4,0,0,0" Click="SavePreset_Click">Save</Button>
+          </Grid>
+        </StackPanel>
+
+        <!-- Row 3: Pass management buttons -->
+        <WrapPanel Grid.Row="3" Margin="5,6,5,0" Orientation="Horizontal">
+          <Button Margin="0,0,4,4"
+                  IsEnabled="{CompiledBinding CanAddBufferA}"
+                  Tag="BufferA" Click="AddBuffer_Click">+Buffer A</Button>
+          <Button Margin="0,0,4,4"
+                  IsEnabled="{CompiledBinding CanAddBufferB}"
+                  Tag="BufferB" Click="AddBuffer_Click">+Buffer B</Button>
+          <Button Margin="0,0,4,4"
+                  IsEnabled="{CompiledBinding CanAddBufferC}"
+                  Tag="BufferC" Click="AddBuffer_Click">+Buffer C</Button>
+          <Button Margin="0,0,4,4"
+                  IsEnabled="{CompiledBinding CanAddBufferD}"
+                  Tag="BufferD" Click="AddBuffer_Click">+Buffer D</Button>
+          <Button Margin="0,0,4,4"
+                  IsEnabled="{CompiledBinding CanAddTexture}"
+                  Tag="Texture" Click="AddBuffer_Click">+Image</Button>
+          <Button Margin="0,0,4,4"
+                  IsEnabled="{CompiledBinding CanAddCommon}"
+                  Tag="Common" Click="AddBuffer_Click">+Common</Button>
+          <Button Margin="0,0,4,4"
+                  IsEnabled="{CompiledBinding CanRemoveSelectedPass}"
+                  Click="RemovePass_Click">Remove</Button>
+          <Button Margin="0,0,0,4" Click="Apply_Click">Apply</Button>
+        </WrapPanel>
+
+        <!-- Row 4: Pass tabs -->
+        <TabControl Grid.Row="4"
+                    Margin="5,6,5,5"
+                    ItemsSource="{CompiledBinding Passes}"
+                    SelectedItem="{CompiledBinding SelectedPass}">
+
+          <TabControl.ItemTemplate>
+            <DataTemplate x:DataType="screens:PassEditorViewModel">
+              <TextBlock Text="{CompiledBinding TabTitle}" />
+            </DataTemplate>
+          </TabControl.ItemTemplate>
+
+          <TabControl.ContentTemplate>
+            <DataTemplate x:DataType="screens:PassEditorViewModel">
+              <Grid RowDefinitions="Auto,*">
+
+                <!-- Channel inputs — collapsed by default; hidden for Common pass -->
+                <Expander Grid.Row="0"
+                          Header="Channels (iChannel0–3)"
+                          IsExpanded="False"
+                          IsVisible="{CompiledBinding ShowChannels}"
+                          Margin="0,0,0,4">
+                  <Grid ColumnDefinitions="Auto,*,Auto"
+                        RowDefinitions="Auto,Auto,Auto,Auto"
+                        Margin="4,4,4,0">
+
+                    <!-- iChannel0 -->
+                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,4">iChannel0</TextBlock>
+                    <ComboBox Grid.Row="0" Grid.Column="1"
+                              Margin="0,0,4,4"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Static screens:PassEditorViewModel.ChannelOptions}"
+                              SelectedItem="{CompiledBinding Ch0}" />
+                    <TextBox Grid.Row="0" Grid.Column="2"
+                             Margin="0,0,0,4"
+                             MinWidth="180"
+                             IsVisible="{CompiledBinding IsImageCh0}"
+                             Watermark="Image file path…"
+                             Text="{CompiledBinding Ch0Source}" />
+
+                    <!-- iChannel1 -->
+                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,4">iChannel1</TextBlock>
+                    <ComboBox Grid.Row="1" Grid.Column="1"
+                              Margin="0,0,4,4"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Static screens:PassEditorViewModel.ChannelOptions}"
+                              SelectedItem="{CompiledBinding Ch1}" />
+                    <TextBox Grid.Row="1" Grid.Column="2"
+                             Margin="0,0,0,4"
+                             MinWidth="180"
+                             IsVisible="{CompiledBinding IsImageCh1}"
+                             Watermark="Image file path…"
+                             Text="{CompiledBinding Ch1Source}" />
+
+                    <!-- iChannel2 -->
+                    <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,4">iChannel2</TextBlock>
+                    <ComboBox Grid.Row="2" Grid.Column="1"
+                              Margin="0,0,4,4"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Static screens:PassEditorViewModel.ChannelOptions}"
+                              SelectedItem="{CompiledBinding Ch2}" />
+                    <TextBox Grid.Row="2" Grid.Column="2"
+                             Margin="0,0,0,4"
+                             MinWidth="180"
+                             IsVisible="{CompiledBinding IsImageCh2}"
+                             Watermark="Image file path…"
+                             Text="{CompiledBinding Ch2Source}" />
+
+                    <!-- iChannel3 -->
+                    <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0">iChannel3</TextBlock>
+                    <ComboBox Grid.Row="3" Grid.Column="1"
+                              Margin="0,0,4,0"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Static screens:PassEditorViewModel.ChannelOptions}"
+                              SelectedItem="{CompiledBinding Ch3}" />
+                    <TextBox Grid.Row="3" Grid.Column="2"
+                             MinWidth="180"
+                             IsVisible="{CompiledBinding IsImageCh3}"
+                             Watermark="Image file path…"
+                             Text="{CompiledBinding Ch3Source}" />
+
+                  </Grid>
+                </Expander>
+
+                <!-- Texture pass: file path only -->
+                <StackPanel Grid.Row="1"
+                            IsVisible="{CompiledBinding IsTexture}"
+                            Margin="0,4,0,0">
+                  <Label>Image file path (PNG, JPEG, BMP…)</Label>
+                  <TextBox Watermark="C:\path\to\image.png"
+                           Text="{CompiledBinding Source}" />
+                </StackPanel>
+
+                <!-- GLSL source editor -->
+                <Grid Grid.Row="1"
+                      IsVisible="{CompiledBinding IsShader}"
+                      RowDefinitions="Auto,*">
+                  <Label Grid.Row="0">Shader (GLSL – Shadertoy compatible)</Label>
+                  <ScrollViewer Grid.Row="1"
+                                HorizontalScrollBarVisibility="Auto"
+                                VerticalScrollBarVisibility="Auto">
+                    <TextBox FontFamily="monospace"
+                             AcceptsReturn="True"
+                             Text="{CompiledBinding Source}" />
+                  </ScrollViewer>
+                </Grid>
+
+              </Grid>
+            </DataTemplate>
+          </TabControl.ContentTemplate>
+
+        </TabControl>
+
+      </Grid>
+    </Border>
+
+    <!-- ====== RIGHT: preview + error ====== -->
+    <Border Grid.Column="1" Classes="card">
+      <Grid>
+        <TextBlock HorizontalAlignment="Left"
+                   VerticalAlignment="Top"
+                   Margin="8"
+                   Foreground="Red"
+                   Text="{CompiledBinding ShaderException}"
+                   TextWrapping="Wrap" />
+        <Image Name="DisplayPreviewImage"
+               VerticalAlignment="Center"
+               HorizontalAlignment="Center"
+               Source="{CompiledBinding PreviewImage}"
+               RenderOptions.BitmapInterpolationMode="LowQuality"
+               Stretch="Uniform"
+               Cursor="Cross"
+               PointerPressed="PreviewMouse_Pressed"
+               PointerMoved="PreviewMouse_Moved"
+               PointerReleased="PreviewMouse_Released" />
+      </Grid>
+    </Border>
+
+  </Grid>
+</UserControl>

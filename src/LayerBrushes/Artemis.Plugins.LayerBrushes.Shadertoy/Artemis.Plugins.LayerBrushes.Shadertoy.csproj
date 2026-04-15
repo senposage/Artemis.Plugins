@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Platforms>x64</Platforms>
+    <RootNamespace>Artemis.Plugins.LayerBrushes.Shadertoy</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <PackageReference Include="ArtemisRGB.Plugins.BuildTask" Version="2.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="native\libEGL.dll"    Link="libEGL.dll"    CopyToOutputDirectory="PreserveNewest" Condition="Exists('native\libEGL.dll')" />
+    <Content Include="native\libGLESv2.dll" Link="libGLESv2.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('native\libGLESv2.dll')" />
+  </ItemGroup>
+</Project>
