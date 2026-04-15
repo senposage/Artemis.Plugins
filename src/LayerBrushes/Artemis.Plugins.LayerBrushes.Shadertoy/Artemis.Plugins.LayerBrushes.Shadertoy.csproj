@@ -6,6 +6,7 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AngleNativeVersion>2025.9.12</AngleNativeVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -14,10 +15,16 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <!-- ANGLE (OpenGL ES + EGL) — BSD-licensed build from the Silk.NET project -->
+    <PackageReference Include="Silk.NET.OpenGLES.ANGLE.Native" Version="$(AngleNativeVersion)" />
   </ItemGroup>
 
+  <!-- The package's own .targets file targets net461 and doesn't fire for net10.0-windows.
+       Copy the win-x64 ANGLE DLLs to the output root explicitly so the plugin can load them. -->
   <ItemGroup>
-    <Content Include="native\libEGL.dll"    Link="libEGL.dll"    CopyToOutputDirectory="PreserveNewest" Condition="Exists('native\libEGL.dll')" />
-    <Content Include="native\libGLESv2.dll" Link="libGLESv2.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('native\libGLESv2.dll')" />
+    <Content Include="$(NuGetPackageRoot)silk.net.opengles.angle.native\$(AngleNativeVersion)\runtimes\win-x64\native\libEGL.dll"
+             Link="libEGL.dll" CopyToOutputDirectory="Always" />
+    <Content Include="$(NuGetPackageRoot)silk.net.opengles.angle.native\$(AngleNativeVersion)\runtimes\win-x64\native\libGLESv2.dll"
+             Link="libGLESv2.dll" CopyToOutputDirectory="Always" />
   </ItemGroup>
 </Project>
