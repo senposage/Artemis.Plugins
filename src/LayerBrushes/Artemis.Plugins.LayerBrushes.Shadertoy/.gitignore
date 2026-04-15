@@ -1,0 +1,5 @@
+# ANGLE native DLLs — not redistributable, must be sourced locally from Chrome or Edge.
+# Copy x64 builds to this folder:
+#   libEGL.dll
+#   libGLESv2.dll
+native/
