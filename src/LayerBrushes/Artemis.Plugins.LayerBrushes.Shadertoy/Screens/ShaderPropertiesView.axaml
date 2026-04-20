@@ -9,7 +9,7 @@
              x:Class="Artemis.Plugins.LayerBrushes.Shadertoy.Screens.ShaderPropertiesView"
              x:DataType="screens:ShaderPropertiesViewModel">
 
-  <Grid ColumnDefinitions="*,*" Margin="15">
+<Grid ColumnDefinitions="*,*" Margin="15">
 
     <!-- ====== LEFT: controls + editor ====== -->
     <Border Grid.Column="0" Margin="0,0,10,0" Classes="card">
@@ -53,13 +53,15 @@
           <StackPanel Grid.Column="3" Margin="8,18,5,5" VerticalAlignment="Top" Spacing="4">
             <CheckBox IsChecked="{CompiledBinding EnableAudio}"
                       Click="InputFinished">Audio</CheckBox>
+            <CheckBox IsChecked="{CompiledBinding StereoAudioTexture}"
+                      Click="InputFinished">Stereo texture</CheckBox>
             <CheckBox IsChecked="{CompiledBinding CubicResize}"
                       Click="InputFinished">Cubic resize</CheckBox>
           </StackPanel>
         </Grid>
 
         <!-- Row 1: Audio settings row -->
-        <Grid Grid.Row="1" Margin="5,4,5,0" ColumnDefinitions="*,*,*,Auto,Auto">
+        <Grid Grid.Row="1" Margin="5,4,5,0" ColumnDefinitions="*,*,*,Auto,Auto,Auto,Auto">
           <!-- dB Floor -->
           <StackPanel Grid.Column="0" Margin="0,0,8,0">
             <Grid ColumnDefinitions="Auto,*">
@@ -110,8 +112,26 @@
               <ComboBoxItem>Linear</ComboBoxItem>
             </ComboBox>
           </StackPanel>
+          <StackPanel Grid.Column="4" Margin="0,0,8,0" MinWidth="150"
+                      IsVisible="{CompiledBinding IsWindowsAudio}">
+            <TextBlock FontSize="11" Margin="0,0,0,2">Audio source</TextBlock>
+            <ComboBox HorizontalAlignment="Stretch"
+                      SelectedIndex="{CompiledBinding AudioInputSource}"
+                      SelectionChanged="InputFinished">
+              <ComboBoxItem>Render loopback</ComboBoxItem>
+              <ComboBoxItem>Stereo Mix / WinMM</ComboBoxItem>
+            </ComboBox>
+          </StackPanel>
+          <StackPanel Grid.Column="5" Margin="0,0,8,0" MinWidth="190"
+                      IsVisible="{CompiledBinding IsWindowsAudio}">
+            <TextBlock FontSize="11" Margin="0,0,0,2">Render device</TextBlock>
+            <ComboBox HorizontalAlignment="Stretch"
+                      ItemsSource="{CompiledBinding AudioDevices}"
+                      SelectedItem="{CompiledBinding SelectedAudioDevice}"
+                      SelectionChanged="InputFinished" />
+          </StackPanel>
           <!-- Freq range (hidden in Linear mode) -->
-          <StackPanel Grid.Column="4" MinWidth="200"
+          <StackPanel Grid.Column="6" MinWidth="200"
                       IsVisible="{CompiledBinding AudioFreqRangeVisible}">
             <TextBlock FontSize="11" Margin="0,0,0,2">Freq range (Hz)</TextBlock>
             <Grid ColumnDefinitions="*,Auto,*">
@@ -133,18 +153,19 @@
         <!-- Row 2: Preset library -->
         <StackPanel Grid.Row="2" Margin="5,6,5,0">
           <Label>Presets</Label>
-          <Grid ColumnDefinitions="*,Auto">
+          <Grid ColumnDefinitions="*,Auto,Auto">
             <ComboBox Grid.Column="0"
                       HorizontalAlignment="Stretch"
                       ItemsSource="{CompiledBinding PresetNames}"
-                      SelectedItem="{CompiledBinding SelectedPreset}"
+                      SelectedItem="{CompiledBinding SelectedPreset, Mode=TwoWay}"
                       PlaceholderText="Select a preset…" />
-            <Button Grid.Column="1" Margin="4,0,0,0" Click="DeletePreset_Click">Delete</Button>
+            <Button Grid.Column="1" Margin="4,0,0,0" Click="NewPreset_Click">New</Button>
+            <Button Grid.Column="2" Margin="4,0,0,0" Click="DeletePreset_Click">Delete</Button>
           </Grid>
           <Grid ColumnDefinitions="*,Auto" Margin="0,4,0,0">
             <TextBox Grid.Column="0"
                      Watermark="Preset name…"
-                     Text="{CompiledBinding SavePresetName}" />
+                     Text="{CompiledBinding SavePresetName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
             <Button Grid.Column="1" Margin="4,0,0,0" Click="SavePreset_Click">Save</Button>
           </Grid>
         </StackPanel>

@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Reactive.Disposables;
 using System.Reactive.Disposables.Fluent;
+using Artemis.Plugins.LayerBrushes.Shadertoy;
 using Artemis.Plugins.LayerBrushes.Shadertoy.LayerBrushes;
 using Artemis.Plugins.LayerBrushes.Shadertoy.LayerBrushes.PropertyGroups;
 using Artemis.UI.Shared.LayerBrushes;
@@ -36,6 +37,9 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
     private bool _enableAudio;
     public bool EnableAudio { get => _enableAudio; set => RaiseAndSetIfChanged(ref _enableAudio, value); }
 
+    private bool _stereoAudioTexture;
+    public bool StereoAudioTexture { get => _stereoAudioTexture; set => RaiseAndSetIfChanged(ref _stereoAudioTexture, value); }
+
     private bool _cubicResize;
     public bool CubicResize { get => _cubicResize; set => RaiseAndSetIfChanged(ref _cubicResize, value); }
 
@@ -47,6 +51,20 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
 
     private double _audioSmoothing;
     public double AudioSmoothing { get => _audioSmoothing; set => RaiseAndSetIfChanged(ref _audioSmoothing, value); }
+
+    private int _audioInputSource;
+    public int AudioInputSource { get => _audioInputSource; set => RaiseAndSetIfChanged(ref _audioInputSource, value); }
+
+    public bool IsWindowsAudio { get; } = OperatingSystem.IsWindows();
+
+    public ObservableCollection<AudioDeviceOption> AudioDevices { get; } = [];
+
+    private AudioDeviceOption? _selectedAudioDevice;
+    public AudioDeviceOption? SelectedAudioDevice
+    {
+        get => _selectedAudioDevice;
+        set => RaiseAndSetIfChanged(ref _selectedAudioDevice, value);
+    }
 
     private int _audioMinFreq;
     public int AudioMinFreq { get => _audioMinFreq; set => RaiseAndSetIfChanged(ref _audioMinFreq, value); }
@@ -106,9 +124,15 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         get => _selectedPreset;
         set
         {
+            if (_selectedPreset == value) return;
             RaiseAndSetIfChanged(ref _selectedPreset, value);
-            if (value == null) return;
-            SavePresetName    = value;
+            if (value == null)
+            {
+                _lastSelectedPreset = null;
+                return;
+            }
+
+            SavePresetName = value;
             _lastSelectedPreset = value;
             LoadSelectedPreset();
         }
@@ -166,19 +190,33 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         Height       = _properties.Height;
         MaxFps       = _properties.MaxFps;
         EnableAudio  = _properties.EnableAudio;
+        StereoAudioTexture = _properties.StereoAudioTexture;
         CubicResize  = _properties.CubicResize;
         AudioDbFloor      = _properties.AudioDbFloor.CurrentValue;
         AudioAttack       = _properties.AudioAttack.CurrentValue;
         AudioSmoothing    = _properties.AudioSmoothing.CurrentValue;
+        AudioInputSource  = _properties.AudioInputSource.CurrentValue;
+        RefreshAudioDevices(_properties.AudioDeviceId.CurrentValue);
         AudioMinFreq      = _properties.AudioMinFreq.CurrentValue;
         AudioMaxFreq      = _properties.AudioMaxFreq.CurrentValue;
         AudioSpectrumMode = _properties.AudioSpectrumMode.CurrentValue;
 
+        var def = ShaderToyLayerBrush.ResolveDefinition();
+        LoadDefinition(def);
         RefreshPresetNames();
-        if (_lastSelectedPreset != null && PresetNames.Contains(_lastSelectedPreset))
-            _selectedPreset = _lastSelectedPreset;   // set backing field — no reload
 
-        LoadDefinition(ShaderToyLayerBrush.ResolveDefinition());
+        string? presetName = ResolveInitialPresetName(def);
+        SetSelectedPresetWithoutLoading(presetName, updateSaveName: presetName != null);
+
+        // If no preset is active but the shader has a meaningful title (e.g. imported from
+        // Shadertoy), pre-fill the save name so the user doesn't have to retype it.
+        if (string.IsNullOrWhiteSpace(SavePresetName) &&
+            !string.IsNullOrWhiteSpace(def.Title) &&
+            def.Title is not ("Custom" or "Untitled"))
+        {
+            SavePresetName = def.Title;
+        }
+
         _isLoading = false;
     }
 
@@ -189,13 +227,21 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         _properties.Height.SetCurrentValue(Height);
         _properties.MaxFps.SetCurrentValue(MaxFps);
         _properties.EnableAudio.SetCurrentValue(EnableAudio);
+        _properties.StereoAudioTexture.SetCurrentValue(StereoAudioTexture);
         _properties.CubicResize.SetCurrentValue(CubicResize);
         _properties.AudioDbFloor.SetCurrentValue((float)AudioDbFloor);
         _properties.AudioAttack.SetCurrentValue((float)AudioAttack);
         _properties.AudioSmoothing.SetCurrentValue((float)AudioSmoothing);
+        _properties.AudioInputSource.SetCurrentValue(AudioInputSource);
+        _properties.AudioDeviceId.SetCurrentValue(SelectedAudioDevice?.Id ?? "");
         _properties.AudioMinFreq.SetCurrentValue(AudioMinFreq);
         _properties.AudioMaxFreq.SetCurrentValue(AudioMaxFreq);
         _properties.AudioSpectrumMode.SetCurrentValue(AudioSpectrumMode);
+
+        // Auto-suggest channel types from GLSL source comments before building definition.
+        // Only fills channels still set to None — never overwrites user choices.
+        foreach (var pass in Passes)
+            pass.SuggestChannels();
 
         var def = BuildDefinition();
         ShaderToyLayerBrush.ApplyDefinition(def);
@@ -242,23 +288,38 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
     {
         if (SelectedPreset == null || ShaderLibrary.Instance == null) return;
         var entry = ShaderLibrary.Instance.Entries.FirstOrDefault(e => e.Name == SelectedPreset);
-        if (entry != null) ApplyDefinition(entry.Shader);
+        if (entry == null) return;
+        entry.Shader.Title = SelectedPreset;   // stamp name into def so it roundtrips through ShaderJson
+        ApplyDefinition(entry.Shader);
     }
 
     public void SaveCurrentPreset()
     {
         if (string.IsNullOrWhiteSpace(SavePresetName) || ShaderLibrary.Instance == null) return;
-        ShaderLibrary.Instance.Save(SavePresetName, BuildDefinition());
+        string presetName = SavePresetName.Trim();
+        var def = BuildDefinition();
+        def.Title = presetName;            // embed name so it roundtrips through ShaderJson
+        ShaderLibrary.Instance.Save(presetName, def);
         RefreshPresetNames();
-        SavePresetName = string.Empty;
+        SetSelectedPresetWithoutLoading(presetName, updateSaveName: true);
+        // Persist the title-stamped def to ShaderJson so the name survives restart
+        ShaderToyLayerBrush.ApplyDefinition(def);
+        ShaderException = ShaderToyLayerBrush.ShaderError ?? string.Empty;
+        RecreatePreviewSurface();
+    }
+
+    public void NewPreset()
+    {
+        SetSelectedPresetWithoutLoading(null, updateSaveName: true);
     }
 
     public void DeleteSelectedPreset()
     {
         if (SelectedPreset == null || ShaderLibrary.Instance == null) return;
-        ShaderLibrary.Instance.Delete(SelectedPreset);
-        SelectedPreset = null;
+        string deletedPreset = SelectedPreset;
+        ShaderLibrary.Instance.Delete(deletedPreset);
         RefreshPresetNames();
+        SetSelectedPresetWithoutLoading(null, updateSaveName: SavePresetName == deletedPreset);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -317,6 +378,41 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         if (ShaderLibrary.Instance == null) return;
         foreach (var e in ShaderLibrary.Instance.Entries)
             PresetNames.Add(e.Name);
+    }
+
+    private string? ResolveInitialPresetName(ShaderDefinition def)
+    {
+        if (!string.IsNullOrWhiteSpace(def.Title) && PresetNames.Contains(def.Title))
+            return def.Title;
+
+        if (_lastSelectedPreset != null && PresetNames.Contains(_lastSelectedPreset))
+            return _lastSelectedPreset;
+
+        return null;
+    }
+
+    private void SetSelectedPresetWithoutLoading(string? presetName, bool updateSaveName)
+    {
+        string? validPresetName = presetName != null && PresetNames.Contains(presetName) ? presetName : null;
+        RaiseAndSetIfChanged(ref _selectedPreset, validPresetName, nameof(SelectedPreset));
+        _lastSelectedPreset = validPresetName;
+
+        if (updateSaveName)
+            SavePresetName = validPresetName ?? string.Empty;
+    }
+
+    private void RefreshAudioDevices(string? selectedId)
+    {
+        AudioDevices.Clear();
+        var defaultOption = new AudioDeviceOption("", "Default render device");
+        AudioDevices.Add(defaultOption);
+
+#if WINDOWS
+        foreach (var device in WasapiLoopback.EnumerateRenderDevices())
+            AudioDevices.Add(device);
+#endif
+
+        SelectedAudioDevice = AudioDevices.FirstOrDefault(d => d.Id == selectedId) ?? defaultOption;
     }
 
     // ------------------------------------------------------------------ mouse input

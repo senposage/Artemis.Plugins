@@ -24,6 +24,7 @@ internal static unsafe class GlesNative
     public const uint GL_TEXTURE_WRAP_S     = 0x2802;
     public const uint GL_TEXTURE_WRAP_T     = 0x2803;
     public const uint GL_CLAMP_TO_EDGE      = 0x812F;
+    public const uint GL_REPEAT             = 0x2901;
     public const uint GL_TEXTURE0           = 0x84C0;
     public const uint GL_FRAMEBUFFER        = 0x8D40;
     public const uint GL_COLOR_ATTACHMENT0  = 0x8CE0;

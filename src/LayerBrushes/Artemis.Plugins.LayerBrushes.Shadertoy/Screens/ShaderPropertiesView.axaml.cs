@@ -16,12 +16,14 @@ public partial class ShaderPropertiesView : ReactiveUserControl<ShaderProperties
         this.WhenActivated(d =>
         {
             ViewModel!.DisplayPreviewImage = DisplayPreviewImage;
+            ViewModel!.Load();
         });
     }
 
     private void InputFinished(object? sender, RoutedEventArgs e) => ViewModel?.Save();
     private void Apply_Click(object? sender, RoutedEventArgs e) => ViewModel?.Save();
     private void SavePreset_Click(object? sender, RoutedEventArgs e) => ViewModel?.SaveCurrentPreset();
+    private void NewPreset_Click(object? sender, RoutedEventArgs e) => ViewModel?.NewPreset();
     private void DeletePreset_Click(object? sender, RoutedEventArgs e) => ViewModel?.DeleteSelectedPreset();
     private void RemovePass_Click(object? sender, RoutedEventArgs e) => ViewModel?.RemoveSelectedPass();
 

@@ -32,8 +32,14 @@ internal sealed class ShaderLibrary
 
     private ShaderLibrary(string pluginDir)
     {
+        // Windows: %Documents%\Artemis\Plugins\Data\ShaderToy
+        // Linux:   ~/.local/share/Artemis/Plugins/Data/ShaderToy  (XDG_DATA_HOME)
+        Environment.SpecialFolder dataFolder = OperatingSystem.IsLinux()
+            ? Environment.SpecialFolder.LocalApplicationData
+            : Environment.SpecialFolder.MyDocuments;
+
         string dataDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            Environment.GetFolderPath(dataFolder),
             "Artemis", "Plugins", "Data", "ShaderToy");
 
         Directory.CreateDirectory(dataDir);

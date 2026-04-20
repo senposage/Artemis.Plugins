@@ -1,131 +1,74 @@
+#if WINDOWS
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 
 /// <summary>
-/// Minimal WASAPI loopback capture via raw COM P/Invoke — zero external dependencies.
-/// Captures the system's default render output as mono float32 samples.
+/// Minimal WASAPI loopback capture via raw COM P/Invoke.
+/// Captures the system's default render output as mono float samples.
 ///
 /// VoiceMeeter workaround: when the default render endpoint is a VoiceMeeter virtual
-/// device, WASAPI loopback never delivers frames (VoiceMeeter's WASAPI implementation
-/// does not support it).  We instead enumerate capture endpoints and capture from
-/// VoiceMeeter's virtual output device ("VoiceMeeter Output" / "VAIO Out"), which is
-/// a normal capture device and does not require the LOOPBACK flag.
+/// device, loopback capture may not deliver frames. In that case we try to capture from
+/// VoiceMeeter's virtual output device instead, which does not require the LOOPBACK flag.
 /// </summary>
 internal sealed unsafe class WasapiLoopback : IDisposable
 {
-    // Invoked on the capture thread: (monoSamples, count)
-    public Action<float[], int>? DataAvailable;
+    public Action<float[], float[], int>? DataAvailable;
+    public int SampleRate => _sampleRate;
 
-    private Thread?               _thread;
-    private volatile bool         _stopping;
-    private IAudioClient?         _audioClient;
-    private IAudioCaptureClient?  _captureClient;
-    private int                   _channels;
-    private bool                  _isFloat;
-    private int                   _bitsPerSample;
+    private readonly string? _deviceId;
+    private Thread? _thread;
+    private volatile bool _stopping;
+    private IAudioClient? _audioClient;
+    private IAudioCaptureClient? _captureClient;
+    private Exception? _startupException;
+    private int _channels;
+    private bool _isFloat;
+    private int _bitsPerSample;
+    private int _bytesPerSample;
+    private int _sampleRate;
+    private int _blockAlign;
 
-    private const uint LOOPBACK            = 0x00020000u; // AUDCLNT_STREAMFLAGS_LOOPBACK
+    private const uint LOOPBACK = 0x00020000u;
     private const uint DEVICE_STATE_ACTIVE = 1u;
-    private const uint STGM_READ           = 0u;
-    private const ushort VT_LPWSTR         = 31;
+    private const uint STGM_READ = 0u;
+    private const ushort VT_LPWSTR = 31;
+    private const int COINIT_MULTITHREADED = 0x0;
+    private const int RPC_E_CHANGED_MODE = unchecked((int)0x80010106);
+    private static readonly Guid Pcm = new("00000001-0000-0010-8000-00aa00389b71");
 
-    // ------------------------------------------------------------------ public
+    public WasapiLoopback(string? deviceId = null)
+    {
+        _deviceId = string.IsNullOrWhiteSpace(deviceId) ? null : deviceId;
+    }
 
     public void Start()
     {
         if (_thread != null) return;
 
-        var enumClsid = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
-        var enumIid   = typeof(IMMDeviceEnumerator).GUID;
-        int hr = CoCreateInstance(ref enumClsid, null, 1 /*INPROC_SERVER*/, ref enumIid, out object enumObj);
-        if (hr < 0) throw new COMException("CoCreateInstance(IMMDeviceEnumerator)", hr);
-        var enumerator = (IMMDeviceEnumerator)enumObj;
-
-        hr = enumerator.GetDefaultAudioEndpoint(0 /*eRender*/, 0 /*eConsole*/, out IMMDevice device);
-        if (hr < 0) throw new COMException("GetDefaultAudioEndpoint", hr);
-
-        // Prefer a dedicated capture endpoint over WASAPI loopback to avoid
-        // conflicts when Artemis's own audio plugin already holds a loopback client.
-        // Priority: Stereo Mix / What U Hear > VoiceMeeter Output > LOOPBACK fallback.
-        uint streamFlags = LOOPBACK;
-        try
-        {
-            string renderName = GetFriendlyName(device);
-            ShaderLogger.Log($"WasapiLoopback: default render endpoint = '{renderName}'");
-
-            // 1. Try Stereo Mix / What U Hear — available on many Realtek / IDT drivers.
-            IMMDevice? stereoMix = FindStereoMixDevice(enumerator);
-            if (stereoMix != null)
-            {
-                string n = GetFriendlyName(stereoMix);
-                ShaderLogger.Log($"WasapiLoopback: using Stereo Mix capture device '{n}'");
-                device      = stereoMix;
-                streamFlags = 0;
-            }
-            // 2. VoiceMeeter virtual output.
-            else if (renderName.IndexOf("VoiceMeeter", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                IMMDevice? vmCapture = FindVoiceMeeterCaptureDevice(enumerator);
-                if (vmCapture != null)
-                {
-                    string n = GetFriendlyName(vmCapture);
-                    ShaderLogger.Log($"WasapiLoopback: VoiceMeeter detected → using capture device '{n}'");
-                    device      = vmCapture;
-                    streamFlags = 0;
-                }
-                else
-                    ShaderLogger.Log("WasapiLoopback: VoiceMeeter detected but no capture device found — falling back to loopback");
-            }
-            else
-            {
-                ShaderLogger.Log("WasapiLoopback: no Stereo Mix found — using loopback on render endpoint");
-            }
-        }
-        catch (Exception ex)
-        {
-            ShaderLogger.Log($"WasapiLoopback: device selection failed ({ex.Message}) — using loopback");
-        }
-
-        var acGuid = typeof(IAudioClient).GUID;
-        hr = device.Activate(ref acGuid, 1, IntPtr.Zero, out object acObj);
-        if (hr < 0) throw new COMException("IMMDevice.Activate(IAudioClient)", hr);
-        _audioClient = (IAudioClient)acObj;
-
-        hr = _audioClient.GetMixFormat(out IntPtr fmtPtr);
-        if (hr < 0) throw new COMException("GetMixFormat", hr);
-
-        try
-        {
-            var fmt = (WAVEFORMATEX*)fmtPtr;
-            _channels      = fmt->nChannels;
-            _bitsPerSample = fmt->wBitsPerSample;
-            if (fmt->wFormatTag == 3) // WAVE_FORMAT_IEEE_FLOAT
-                _isFloat = true;
-            else if (fmt->wFormatTag == 0xFFFE) // WAVE_FORMAT_EXTENSIBLE
-                _isFloat = ((WAVEFORMATEXTENSIBLE*)fmt)->SubFormat == IeeeFloat;
-
-            // For loopback streams, hnsBufferDuration must be 0 (engine chooses size).
-            // For capture streams, use a 200 ms buffer.
-            long bufDuration = (streamFlags & LOOPBACK) != 0 ? 0L : 2_000_000L;
-            hr = _audioClient.Initialize(0, streamFlags, bufDuration, 0, fmtPtr, IntPtr.Zero);
-            if (hr < 0) throw new COMException($"IAudioClient.Initialize (flags=0x{streamFlags:X})", hr);
-        }
-        finally { CoTaskMemFree(fmtPtr); }
-
-        var ccGuid = typeof(IAudioCaptureClient).GUID;
-        hr = _audioClient.GetService(ref ccGuid, out object ccObj);
-        if (hr < 0) throw new COMException("GetService(IAudioCaptureClient)", hr);
-        _captureClient = (IAudioCaptureClient)ccObj;
-
-        hr = _audioClient.Start();
-        if (hr < 0) throw new COMException("IAudioClient.Start", hr);
-
         _stopping = false;
-        _thread = new Thread(CaptureLoop) { IsBackground = true, Name = "WASAPI-Loopback" };
+        _startupException = null;
+        using var started = new ManualResetEventSlim(false);
+        _thread = new Thread(() => CaptureLoop(started))
+        {
+            IsBackground = true,
+            Name = "WASAPI-Loopback"
+        };
+        _thread.SetApartmentState(ApartmentState.MTA);
         _thread.Start();
+
+        if (!started.Wait(TimeSpan.FromSeconds(5)))
+            throw new TimeoutException("WASAPI capture thread did not finish initialization");
+
+        if (_startupException == null)
+            return;
+
+        _thread.Join(500);
+        _thread = null;
+        throw new InvalidOperationException("WASAPI capture failed to initialize", _startupException);
     }
 
     public void Dispose()
@@ -133,115 +76,345 @@ internal sealed unsafe class WasapiLoopback : IDisposable
         _stopping = true;
         _thread?.Join(500);
         _thread = null;
-        try { _audioClient?.Stop(); } catch { }
-        if (_captureClient != null) { Marshal.ReleaseComObject(_captureClient); _captureClient = null; }
-        if (_audioClient   != null) { Marshal.ReleaseComObject(_audioClient);   _audioClient   = null; }
     }
 
-    // ------------------------------------------------------------------ capture loop
+    private readonly float[] _left = new float[48000 * 8];
+    private readonly float[] _right = new float[48000 * 8];
 
-    private readonly float[] _scratch = new float[48000 * 2]; // up to ~1 s stereo at 48 kHz
-
-    private void CaptureLoop()
+    private void CaptureLoop(ManualResetEventSlim started)
     {
         int pollCount = 0;
         int errorCount = 0;
+        bool comInitialized = false;
 
-        while (!_stopping)
+        try
         {
-            Thread.Sleep(10);
-            if (_captureClient == null) break;
+            int initHr = CoInitializeEx(IntPtr.Zero, COINIT_MULTITHREADED);
+            if (initHr < 0 && initHr != RPC_E_CHANGED_MODE)
+                throw new COMException("CoInitializeEx", initHr);
+            comInitialized = initHr >= 0;
+
+            InitializeCapture();
+            started.Set();
+        }
+        catch (Exception ex)
+        {
+            _startupException = ex;
+            started.Set();
+            ShaderLogger.Log($"WasapiLoopback: startup failed: {ex}");
+            TeardownCapture();
+            if (comInitialized)
+                CoUninitialize();
+            return;
+        }
+
+        try
+        {
+            while (!_stopping)
+            {
+                Thread.Sleep(10);
+                if (_captureClient == null) break;
+
+                try
+                {
+                    while (true)
+                    {
+                        int packetHr = _captureClient.GetNextPacketSize(out uint packet);
+                        if (packetHr < 0)
+                        {
+                            if (errorCount++ < 5)
+                                ShaderLogger.Log($"CaptureLoop: GetNextPacketSize hr=0x{packetHr:X8}");
+                            break;
+                        }
+
+                        if (packet == 0)
+                        {
+                            if (++pollCount == 200)
+                                ShaderLogger.Log("CaptureLoop: 200 empty polls - no audio frames delivered");
+                            break;
+                        }
+
+                        int bufHr = _captureClient.GetBuffer(out IntPtr data, out uint frames, out uint flags, out _, out _);
+                        if (bufHr < 0)
+                        {
+                            if (errorCount++ < 5)
+                                ShaderLogger.Log($"CaptureLoop: GetBuffer hr=0x{bufHr:X8}");
+                            break;
+                        }
+
+                        try
+                        {
+                            bool silent = (flags & 2u) != 0;
+                            if (frames > 0)
+                            {
+                                if (silent)
+                                    DeliverSilence(frames);
+                                else
+                                    Deliver(data, frames);
+                            }
+                        }
+                        finally
+                        {
+                            _captureClient.ReleaseBuffer(frames);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (errorCount++ < 5)
+                        ShaderLogger.Log($"CaptureLoop: exception: {ex.Message}");
+                }
+            }
+        }
+        finally
+        {
+            ShaderLogger.Log($"CaptureLoop: exited (polls={pollCount}, errors={errorCount})");
+            TeardownCapture();
+            if (comInitialized)
+                CoUninitialize();
+        }
+    }
+
+    private void InitializeCapture()
+    {
+        var enumClsid = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+        var enumIid = typeof(IMMDeviceEnumerator).GUID;
+        int hr = CoCreateInstance(ref enumClsid, null, 1, ref enumIid, out object enumObj);
+        if (hr < 0) throw new COMException("CoCreateInstance(IMMDeviceEnumerator)", hr);
+
+        var enumerator = (IMMDeviceEnumerator)enumObj;
+        IMMDevice? device = null;
+
+        try
+        {
+            if (_deviceId != null)
+            {
+                hr = enumerator.GetDevice(_deviceId, out device);
+                if (hr < 0) throw new COMException("GetDevice(selected render endpoint)", hr);
+            }
+            else
+            {
+                // Match the working NAudio plugin: bind the multimedia render default,
+                // not the console role, so we listen to the same active playback target.
+                hr = enumerator.GetDefaultAudioEndpoint(0, 1, out device);
+                if (hr < 0) throw new COMException("GetDefaultAudioEndpoint", hr);
+            }
+
+            uint streamFlags = LOOPBACK;
+            string renderName = GetFriendlyName(device);
+            ShaderLogger.Log($"WasapiLoopback: render endpoint = '{renderName}', explicitDevice={_deviceId != null}, id='{_deviceId ?? "<default>"}'");
+
+            var acGuid = typeof(IAudioClient).GUID;
+            hr = device.Activate(ref acGuid, 1, IntPtr.Zero, out object acObj);
+            if (hr < 0) throw new COMException("IMMDevice.Activate(IAudioClient)", hr);
+            _audioClient = (IAudioClient)acObj;
+
+            hr = _audioClient.GetMixFormat(out IntPtr fmtPtr);
+            if (hr < 0) throw new COMException("GetMixFormat", hr);
 
             try
             {
-                while (true)
+                var fmt = (WAVEFORMATEX*)fmtPtr;
+                _channels = Math.Max(1, (int)fmt->nChannels);
+                _sampleRate = (int)fmt->nSamplesPerSec;
+                _blockAlign = fmt->nBlockAlign;
+                _bitsPerSample = fmt->wBitsPerSample;
+                _bytesPerSample = Math.Max(1, _bitsPerSample / 8);
+                _isFloat = false;
+                ushort formatTag = fmt->wFormatTag;
+                Guid subFormat = Guid.Empty;
+
+                if (fmt->wFormatTag == 3)
+                    _isFloat = true;
+                else if (fmt->wFormatTag == 0xFFFE)
                 {
-                    int packetHr = _captureClient.GetNextPacketSize(out uint packet);
-                    if (packetHr < 0)
-                    {
-                        if (errorCount++ < 5)
-                            ShaderLogger.Log($"CaptureLoop: GetNextPacketSize hr=0x{packetHr:X8}");
-                        break;
-                    }
-                    if (packet == 0)
-                    {
-                        if (++pollCount == 200) // log once after ~2 s of empty polls
-                            ShaderLogger.Log("CaptureLoop: 200 empty polls — no audio frames delivered");
-                        break;
-                    }
-
-                    int bufHr = _captureClient.GetBuffer(
-                        out IntPtr data, out uint frames,
-                        out uint flags, out _, out _);
-                    if (bufHr < 0)
-                    {
-                        if (errorCount++ < 5)
-                            ShaderLogger.Log($"CaptureLoop: GetBuffer hr=0x{bufHr:X8}");
-                        break;
-                    }
-
-                    bool silent = (flags & 2u) != 0; // AUDCLNT_BUFFERFLAGS_SILENT
-                    if (frames > 0)
-                    {
-                        if (silent)
-                            DeliverSilence(frames);
-                        else
-                            Deliver(data, frames);
-                    }
-
-                    _captureClient.ReleaseBuffer(frames);
+                    subFormat = ((WAVEFORMATEXTENSIBLE*)fmt)->SubFormat;
+                    _isFloat = subFormat == IeeeFloat;
+                    if (!_isFloat && subFormat != Pcm)
+                        ShaderLogger.Log($"WasapiLoopback: extensible subformat {subFormat} will be treated as PCM");
                 }
+
+                ShaderLogger.Log($"WasapiLoopback: mix format tag=0x{formatTag:X4}, sub={subFormat}, rate={_sampleRate}, channels={_channels}, bits={_bitsPerSample}, bytesPerSample={_bytesPerSample}, blockAlign={_blockAlign}, float={_isFloat}");
+
+                long bufDuration = (streamFlags & LOOPBACK) != 0 ? 0L : 2_000_000L;
+                hr = _audioClient.Initialize(0, streamFlags, bufDuration, 0, fmtPtr, IntPtr.Zero);
+                if (hr < 0) throw new COMException($"IAudioClient.Initialize (flags=0x{streamFlags:X})", hr);
             }
-            catch (Exception ex)
+            finally
             {
-                if (errorCount++ < 5)
-                    ShaderLogger.Log($"CaptureLoop: exception: {ex.Message}");
+                CoTaskMemFree(fmtPtr);
             }
+
+            var ccGuid = typeof(IAudioCaptureClient).GUID;
+            hr = _audioClient.GetService(ref ccGuid, out object ccObj);
+            if (hr < 0) throw new COMException("GetService(IAudioCaptureClient)", hr);
+            _captureClient = (IAudioCaptureClient)ccObj;
+
+            hr = _audioClient.Start();
+            if (hr < 0) throw new COMException("IAudioClient.Start", hr);
         }
-        ShaderLogger.Log($"CaptureLoop: exited (polls={pollCount}, errors={errorCount})");
+        finally
+        {
+            if (device != null)
+                Marshal.ReleaseComObject(device);
+            Marshal.ReleaseComObject(enumerator);
+        }
+    }
+
+    private void TeardownCapture()
+    {
+        try { _audioClient?.Stop(); } catch { }
+        if (_captureClient != null) { Marshal.ReleaseComObject(_captureClient); _captureClient = null; }
+        if (_audioClient != null) { Marshal.ReleaseComObject(_audioClient); _audioClient = null; }
     }
 
     private void DeliverSilence(uint frames)
     {
-        // Feed zero-amplitude samples — waveform mapping: (0×0.5+0.5)×255 = 127 (midpoint)
         int count = (int)frames;
-        if (count > _scratch.Length) return;
-        Array.Clear(_scratch, 0, count);
-        DataAvailable?.Invoke(_scratch, count);
+        if (count > _left.Length) return;
+        Array.Clear(_left, 0, count);
+        Array.Clear(_right, 0, count);
+        DataAvailable?.Invoke(_left, _right, count);
     }
 
     private void Deliver(IntPtr data, uint frames)
     {
         int total = (int)frames * _channels;
-        if (total > _scratch.Length) return;
+        if (total > _left.Length * Math.Max(1, _channels)) return;
 
-        int monoCount = (int)frames;
+        int frameCount = (int)frames;
         if (_isFloat && _bitsPerSample == 32)
         {
             var src = (float*)data;
-            for (int i = 0; i < monoCount; i++)
+            for (int i = 0; i < frameCount; i++)
             {
-                float s = 0f;
-                for (int ch = 0; ch < _channels; ch++) s += src[i * _channels + ch];
-                _scratch[i] = s / _channels;
+                _left[i] = src[i * _channels];
+                _right[i] = _channels > 1 ? src[i * _channels + 1] : _left[i];
             }
         }
         else if (!_isFloat && _bitsPerSample == 16)
         {
             var src = (short*)data;
-            for (int i = 0; i < monoCount; i++)
+            for (int i = 0; i < frameCount; i++)
             {
-                float s = 0f;
-                for (int ch = 0; ch < _channels; ch++) s += src[i * _channels + ch] / 32768f;
-                _scratch[i] = s / _channels;
+                _left[i] = src[i * _channels] / 32768f;
+                _right[i] = _channels > 1 ? src[i * _channels + 1] / 32768f : _left[i];
             }
         }
-        else return;
+        else if (!_isFloat && _bitsPerSample == 24)
+        {
+            byte* src = (byte*)data;
+            for (int i = 0; i < frameCount; i++)
+            {
+                _left[i] = ReadPcm24(src, i, 0) / 8388608f;
+                _right[i] = _channels > 1 ? ReadPcm24(src, i, 1) / 8388608f : _left[i];
+            }
+        }
+        else if (!_isFloat && _bitsPerSample == 32)
+        {
+            var src = (int*)data;
+            for (int i = 0; i < frameCount; i++)
+            {
+                _left[i] = src[i * _channels] / 2147483648f;
+                _right[i] = _channels > 1 ? src[i * _channels + 1] / 2147483648f : _left[i];
+            }
+        }
+        else
+        {
+            ShaderLogger.Log($"WasapiLoopback: unsupported mix format bits={_bitsPerSample} channels={_channels} float={_isFloat} bytes={_bytesPerSample}");
+            return;
+        }
 
-        DataAvailable?.Invoke(_scratch, monoCount);
+        DataAvailable?.Invoke(_left, _right, frameCount);
     }
 
-    // ------------------------------------------------------------------ VoiceMeeter helpers
+    private int ReadPcm24(byte* src, int frame, int channel)
+    {
+        int offset = (frame * _channels + channel) * _bytesPerSample;
+        int sample = src[offset] | (src[offset + 1] << 8) | (src[offset + 2] << 16);
+        if ((sample & 0x800000) != 0)
+            sample |= unchecked((int)0xFF000000);
+        return sample;
+    }
+
+    public static AudioDeviceOption[] EnumerateRenderDevices()
+    {
+        int initHr = CoInitializeEx(IntPtr.Zero, COINIT_MULTITHREADED);
+        bool comInitialized = initHr >= 0;
+        if (initHr < 0 && initHr != RPC_E_CHANGED_MODE)
+        {
+            ShaderLogger.Log($"WasapiLoopback.EnumerateRenderDevices: CoInitializeEx hr=0x{initHr:X8}");
+            return [];
+        }
+
+        try
+        {
+            var enumClsid = new Guid("BCDE0395-E52F-467C-8E3D-C4579291692E");
+            var enumIid = typeof(IMMDeviceEnumerator).GUID;
+            int hr = CoCreateInstance(ref enumClsid, null, 1, ref enumIid, out object enumObj);
+            if (hr < 0)
+            {
+                ShaderLogger.Log($"WasapiLoopback.EnumerateRenderDevices: CoCreateInstance hr=0x{hr:X8}");
+                return [];
+            }
+
+            var enumerator = (IMMDeviceEnumerator)enumObj;
+            IMMDeviceCollection? collection = null;
+            try
+            {
+                hr = enumerator.EnumAudioEndpoints(0, DEVICE_STATE_ACTIVE, out collection);
+                if (hr < 0)
+                {
+                    ShaderLogger.Log($"WasapiLoopback.EnumerateRenderDevices: EnumAudioEndpoints hr=0x{hr:X8}");
+                    return [];
+                }
+
+                hr = collection.GetCount(out uint count);
+                if (hr < 0) return [];
+
+                var devices = new AudioDeviceOption[count];
+                for (uint i = 0; i < count; i++)
+                {
+                    hr = collection.Item(i, out IMMDevice device);
+                    if (hr < 0)
+                    {
+                        devices[i] = new AudioDeviceOption("", $"Unreadable render device #{i}");
+                        continue;
+                    }
+
+                    try
+                    {
+                        string name = GetFriendlyName(device);
+                        device.GetId(out string id);
+                        devices[i] = new AudioDeviceOption(id, string.IsNullOrWhiteSpace(name) ? id : name);
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(device);
+                    }
+                }
+
+                ShaderLogger.Log($"WasapiLoopback.EnumerateRenderDevices: found {devices.Length} active render endpoint(s)");
+                return devices.Where(d => !string.IsNullOrWhiteSpace(d.Id)).ToArray();
+            }
+            finally
+            {
+                if (collection != null)
+                    Marshal.ReleaseComObject(collection);
+                Marshal.ReleaseComObject(enumerator);
+            }
+        }
+        catch (Exception ex)
+        {
+            ShaderLogger.Log($"WasapiLoopback.EnumerateRenderDevices: failed: {ex}");
+            return [];
+        }
+        finally
+        {
+            if (comInitialized)
+                CoUninitialize();
+        }
+    }
 
     private static string GetFriendlyName(IMMDevice device)
     {
@@ -251,125 +424,16 @@ internal sealed unsafe class WasapiLoopback : IDisposable
         {
             var key = new PROPERTYKEY
             {
-                fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"), // PKEY_Device_FriendlyName
-                pid   = 14
+                fmtid = new Guid("A45C254E-DF1C-4EFD-8020-67D146A850E0"),
+                pid = 14
             };
             hr = store.GetValue(ref key, out PROPVARIANT pv);
             if (hr < 0 || pv.vt != VT_LPWSTR) return string.Empty;
-            try   { return Marshal.PtrToStringUni(pv.p) ?? string.Empty; }
+            try { return Marshal.PtrToStringUni(pv.p) ?? string.Empty; }
             finally { PropVariantClear(ref pv); }
         }
         finally { Marshal.ReleaseComObject(store); }
     }
-
-    /// <summary>
-    /// Looks for a "Stereo Mix" / "What U Hear" capture device (available on many
-    /// Realtek / IDT drivers).  These devices capture the final mixed render output
-    /// without needing the LOOPBACK flag, so they don't conflict with other loopback
-    /// clients that may already be active on the render endpoint.
-    /// Note: Stereo Mix is often disabled by default — the user may need to enable it
-    /// in Sound settings → Recording tab → right-click → Show Disabled Devices.
-    /// </summary>
-    private static IMMDevice? FindStereoMixDevice(IMMDeviceEnumerator enumerator)
-    {
-        // Include disabled devices so we can tell the user to enable Stereo Mix.
-        const uint ALL_STATES = 0x0Fu;
-        int hr = enumerator.EnumAudioEndpoints(1 /*eCapture*/, ALL_STATES,
-                                               out IMMDeviceCollection col);
-        if (hr < 0) return null;
-
-        IMMDevice? result = null;
-        try
-        {
-            hr = col.GetCount(out uint count);
-            if (hr < 0) return null;
-
-            for (uint i = 0; i < count; i++)
-            {
-                hr = col.Item(i, out IMMDevice dev);
-                if (hr < 0) continue;
-
-                bool keep = false;
-                try
-                {
-                    dev.GetState(out uint state);
-                    string name = GetFriendlyName(dev);
-
-                    if (state != DEVICE_STATE_ACTIVE)
-                    {
-                        if (IsWhatUHear(name))
-                            ShaderLogger.Log($"WasapiLoopback: '{name}' exists but is disabled — enable it in Sound settings for audio capture");
-                    }
-                    else if (IsWhatUHear(name))
-                    {
-                        result = dev;
-                        keep   = true;
-                    }
-                }
-                catch { /* skip unreadable devices */ }
-                finally { if (!keep) Marshal.ReleaseComObject(dev); }
-
-                if (keep) break;
-            }
-        }
-        finally { Marshal.ReleaseComObject(col); }
-
-        return result;
-    }
-
-    private static bool IsWhatUHear(string name) =>
-        name.IndexOf("Stereo Mix",  StringComparison.OrdinalIgnoreCase) >= 0 ||
-        name.IndexOf("What U Hear", StringComparison.OrdinalIgnoreCase) >= 0 ||
-        name.IndexOf("Wave Out",    StringComparison.OrdinalIgnoreCase) >= 0 ||
-        name.IndexOf("Mix",         StringComparison.OrdinalIgnoreCase) >= 0 && // avoid false positives
-        name.IndexOf("Realtek",     StringComparison.OrdinalIgnoreCase) >= 0;
-
-    /// <summary>
-    /// Enumerates active capture endpoints and returns the first one whose friendly
-    /// name contains "VoiceMeeter" and "Out" — i.e. VoiceMeeter's virtual output.
-    /// Returns null if no such device is found.
-    /// </summary>
-    private static IMMDevice? FindVoiceMeeterCaptureDevice(IMMDeviceEnumerator enumerator)
-    {
-        int hr = enumerator.EnumAudioEndpoints(1 /*eCapture*/, DEVICE_STATE_ACTIVE,
-                                               out IMMDeviceCollection col);
-        if (hr < 0) return null;
-
-        IMMDevice? result = null;
-        try
-        {
-            hr = col.GetCount(out uint count);
-            if (hr < 0) return null;
-
-            for (uint i = 0; i < count; i++)
-            {
-                hr = col.Item(i, out IMMDevice dev);
-                if (hr < 0) continue;
-
-                bool keep = false;
-                try
-                {
-                    string name = GetFriendlyName(dev);
-                    // Match "VoiceMeeter Output", "VoiceMeeter VAIO Out", etc.
-                    if (name.IndexOf("VoiceMeeter", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                        name.IndexOf("Out", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        result = dev;
-                        keep   = true;
-                        break;
-                    }
-                }
-                catch { /* skip unreadable devices */ }
-
-                if (!keep) Marshal.ReleaseComObject(dev);
-            }
-        }
-        finally { Marshal.ReleaseComObject(col); }
-
-        return result;
-    }
-
-    // ------------------------------------------------------------------ COM P/Invoke
 
     [DllImport("ole32.dll")]
     private static extern int CoCreateInstance(
@@ -380,30 +444,34 @@ internal sealed unsafe class WasapiLoopback : IDisposable
         [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
 
     [DllImport("ole32.dll")]
+    private static extern int CoInitializeEx(IntPtr pvReserved, int dwCoInit);
+
+    [DllImport("ole32.dll")]
+    private static extern void CoUninitialize();
+
+    [DllImport("ole32.dll")]
     private static extern void CoTaskMemFree(IntPtr pv);
 
     [DllImport("ole32.dll")]
     private static extern int PropVariantClear(ref PROPVARIANT pvar);
 
-    // ------------------------------------------------------------------ structs / interfaces
-
     private static readonly Guid IeeeFloat = new("00000003-0000-0010-8000-00aa00389b71");
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 2)]
     private struct WAVEFORMATEX
     {
         public ushort wFormatTag, nChannels;
-        public uint   nSamplesPerSec, nAvgBytesPerSec;
+        public uint nSamplesPerSec, nAvgBytesPerSec;
         public ushort nBlockAlign, wBitsPerSample, cbSize;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+    [StructLayout(LayoutKind.Sequential, Pack = 2)]
     private struct WAVEFORMATEXTENSIBLE
     {
         public WAVEFORMATEX Format;
-        public ushort       Samples;
-        public uint         dwChannelMask;
-        public Guid         SubFormat;
+        public ushort Samples;
+        public uint dwChannelMask;
+        public Guid SubFormat;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -413,13 +481,11 @@ internal sealed unsafe class WasapiLoopback : IDisposable
         public uint pid;
     }
 
-    // PROPVARIANT: always 16 bytes on both x86 and x64.
-    // vt (type tag) at offset 0; union data at offset 8 (pointer for VT_LPWSTR).
     [StructLayout(LayoutKind.Explicit, Size = 16)]
     private struct PROPVARIANT
     {
         [FieldOffset(0)] public ushort vt;
-        [FieldOffset(8)] public IntPtr p; // e.g. LPWSTR for VT_LPWSTR
+        [FieldOffset(8)] public IntPtr p;
     }
 
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"),
@@ -447,7 +513,7 @@ internal sealed unsafe class WasapiLoopback : IDisposable
     private interface IMMDevice
     {
         [PreserveSig] int Activate(ref Guid iid, uint dwClsCtx, IntPtr pActivationParams,
-                                   [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+            [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
         [PreserveSig] int OpenPropertyStore(uint stgmAccess,
             [MarshalAs(UnmanagedType.Interface)] out IPropertyStore ppProperties);
         [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
@@ -470,7 +536,7 @@ internal sealed unsafe class WasapiLoopback : IDisposable
     private interface IAudioClient
     {
         [PreserveSig] int Initialize(int shareMode, uint streamFlags, long bufDuration, long periodicity,
-                                     IntPtr pFormat, IntPtr sessionGuid);
+            IntPtr pFormat, IntPtr sessionGuid);
         [PreserveSig] int GetBufferSize(out uint pNumBufferFrames);
         [PreserveSig] int GetStreamLatency(out long phnsLatency);
         [PreserveSig] int GetCurrentPadding(out uint pNumPaddingFrames);
@@ -489,8 +555,9 @@ internal sealed unsafe class WasapiLoopback : IDisposable
     private interface IAudioCaptureClient
     {
         [PreserveSig] int GetBuffer(out IntPtr ppData, out uint pNumFramesAvailable,
-                                    out uint pdwFlags, out ulong pu64DevicePosition, out ulong pu64QPCPosition);
+            out uint pdwFlags, out ulong pu64DevicePosition, out ulong pu64QPCPosition);
         [PreserveSig] int ReleaseBuffer(uint NumFramesRead);
         [PreserveSig] int GetNextPacketSize(out uint pNumFramesInNextPacket);
     }
 }
+#endif

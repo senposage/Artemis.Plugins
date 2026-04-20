@@ -112,12 +112,16 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
         {
             if (_renderer == null || _bitmap == null) return false;
             _renderer.EnableAudio    = Properties.Shader.EnableAudio.CurrentValue;
+            AudioCapture.StereoTexture = Properties.Shader.StereoAudioTexture.CurrentValue;
             AudioCapture.DbFloor        = Properties.Shader.AudioDbFloor.CurrentValue;
             AudioCapture.Attack         = Properties.Shader.AudioAttack.CurrentValue;
             AudioCapture.Smoothing      = Properties.Shader.AudioSmoothing.CurrentValue;
+            AudioCapture.InputSource    = (AudioInputSource)Properties.Shader.AudioInputSource.CurrentValue;
+            AudioCapture.SelectedDeviceId = Properties.Shader.AudioDeviceId.CurrentValue;
             AudioCapture.MinFrequency   = Properties.Shader.AudioMinFreq.CurrentValue;
             AudioCapture.MaxFrequency   = Properties.Shader.AudioMaxFreq.CurrentValue;
             AudioCapture.FrequencyScale = (SpectrumMode)Properties.Shader.AudioSpectrumMode.CurrentValue;
+            AudioCapture.EnsureActive(_renderer.EnableAudio);
             _renderer.RenderToBuffer(bitmap);
             return true;
         }
@@ -145,11 +149,15 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
             if (_renderer == null || _bitmap == null) return;
             _renderer.MaxFps         = Properties.Shader.MaxFps.CurrentValue;
             _renderer.EnableAudio    = Properties.Shader.EnableAudio.CurrentValue;
+            AudioCapture.StereoTexture = Properties.Shader.StereoAudioTexture.CurrentValue;
             AudioCapture.DbFloor        = Properties.Shader.AudioDbFloor.CurrentValue;
             AudioCapture.Smoothing      = Properties.Shader.AudioSmoothing.CurrentValue;
+            AudioCapture.InputSource    = (AudioInputSource)Properties.Shader.AudioInputSource.CurrentValue;
+            AudioCapture.SelectedDeviceId = Properties.Shader.AudioDeviceId.CurrentValue;
             AudioCapture.MinFrequency   = Properties.Shader.AudioMinFreq.CurrentValue;
             AudioCapture.MaxFrequency   = Properties.Shader.AudioMaxFreq.CurrentValue;
             AudioCapture.FrequencyScale = (SpectrumMode)Properties.Shader.AudioSpectrumMode.CurrentValue;
+            AudioCapture.EnsureActive(_renderer.EnableAudio);
             _renderer.RenderToBuffer(_bitmap);
             using var drawPaint = paint.Clone();
             if (Properties.Shader.CubicResize.CurrentValue)

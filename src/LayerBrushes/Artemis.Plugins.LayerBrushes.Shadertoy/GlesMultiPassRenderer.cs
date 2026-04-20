@@ -16,8 +16,9 @@ namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 /// read the previous frame's own output without data hazards.
 ///
 /// Stubbed channels:
-///   Keyboard  → 256×3 all-zero texture  (no key presses)
-///   Audio/Noise/Video/Cubemap → 1×1 black texture
+///   Keyboard      → 256×3 all-zero texture  (no key presses)
+///   Noise2D/3D    → generated 256×256 RGBA/grey noise with GL_REPEAT
+///   Video/Cubemap → 1×1 black texture
 /// </summary>
 internal sealed unsafe class GlesMultiPassRenderer : IDisposable
 {
@@ -62,6 +63,8 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     private uint _imageTex;     // output texture (for ReadPixels)
     private uint _stubTex;      // 1×1 black — unused channels
     private uint _keyboardTex;  // 256×3 all-zero keyboard stub
+    private uint _noise2dTex;   // 256×256 RGBA noise — Noise2D channels
+    private uint _noise3dTex;   // 256×256 grey noise  — Noise3D channels (2D approximation)
     private uint _vertShader;   // shared vertex shader
     private uint _audioTex;     // 512×2 audio texture (FFT row 0 + waveform row 1)
     private bool _hasAudioInput;// true if any pass references an Audio channel
@@ -130,6 +133,11 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
         // Stub textures
         _stubTex     = MakeStubTex(1, 1, null);          // 1×1 black
         _keyboardTex = MakeStubTex(256, 3, null);        // 256×3 all-zero keyboard
+
+        // Noise textures (generated once; tiling via GL_REPEAT)
+        _noise2dTex = CreateNoiseTex(256, 256, grey: false, seed: 0);
+        _noise3dTex = CreateNoiseTex(256, 256, grey: true,  seed: 1);
+        ShaderLogger.Log($"MultiPass.Setup: noise2d={_noise2dTex} noise3d={_noise3dTex}");
 
         // Image pass output FBO
         CreateFboTex(Width, Height, out _imageFbo, out _imageTex);
@@ -383,6 +391,8 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
                 ChannelInputType.BufferC  => GetBufferTex(PassType.BufferC, pingPongReadIdx),
                 ChannelInputType.BufferD  => GetBufferTex(PassType.BufferD, pingPongReadIdx),
                 ChannelInputType.Keyboard => _keyboardTex,
+                ChannelInputType.Noise2D  => _noise2dTex,
+                ChannelInputType.Noise3D  => _noise3dTex,
                 ChannelInputType.Audio    => _audioTex != 0 ? _audioTex : _stubTex,
                 ChannelInputType.Texture  => LoadOrGetImageTex(_texturePassPath),
                 ChannelInputType.Image    => LoadOrGetImageTex(inp.Source),
@@ -514,6 +524,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
 
         uint imageFbo = _imageFbo, imageTex = _imageTex;
         uint stub = _stubTex, kbd = _keyboardTex, audioTex = _audioTex;
+        uint noise2d = _noise2dTex, noise3d = _noise3dTex;
         uint vao = _vao;
 
         if (imageFbo  != 0) glDeleteFramebuffers(1, &imageFbo);
@@ -521,9 +532,11 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
         if (stub      != 0) glDeleteTextures(1, &stub);
         if (kbd       != 0) glDeleteTextures(1, &kbd);
         if (audioTex  != 0) glDeleteTextures(1, &audioTex);
+        if (noise2d   != 0) glDeleteTextures(1, &noise2d);
+        if (noise3d   != 0) glDeleteTextures(1, &noise3d);
         if (vao       != 0) glDeleteVertexArrays(1, &vao);
 
-        _imageFbo = _imageTex = _stubTex = _keyboardTex = _audioTex = _vao = 0;
+        _imageFbo = _imageTex = _stubTex = _keyboardTex = _audioTex = _noise2dTex = _noise3dTex = _vao = 0;
 
         foreach (uint imgTex in _imageTextures.Values)
         {
@@ -535,6 +548,25 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
 
     // ------------------------------------------------------------------
     // GL helpers
+
+    private unsafe uint CreateNoiseTex(int w, int h, bool grey, uint seed)
+    {
+        byte[] data = grey
+            ? NoiseTextureCache.GenerateGrey(w, h, seed)
+            : NoiseTextureCache.GenerateRgba(w, h, seed);
+
+        uint t; glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
+        fixed (byte* p = data)
+            glTexImage2D(GL_TEXTURE_2D, 0, (int)GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, p);
+        // Noise textures tile — shaders commonly sample with fract(uv * scale)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (int)GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (int)GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (int)GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (int)GL_REPEAT);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return t;
+    }
 
     private uint CompileShader(uint type, string src)
     {

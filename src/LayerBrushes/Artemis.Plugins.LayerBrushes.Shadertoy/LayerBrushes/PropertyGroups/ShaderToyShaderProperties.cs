@@ -23,6 +23,8 @@ public class ShaderToyShaderProperties : LayerPropertyGroup
     public IntLayerProperty MaxFps    { get; set; }
     /// <summary>When false, Audio channel inputs receive a silent stub texture.</summary>
     public BoolLayerProperty EnableAudio { get; set; }
+    /// <summary>When true, audio texture channels are R=left, G=right, B=mono. When false, R/B contain mono for compatibility.</summary>
+    public BoolLayerProperty StereoAudioTexture { get; set; }
     /// <summary>When true, uses cubic (high-quality) filtering when scaling the rendered bitmap to LED bounds.</summary>
     public BoolLayerProperty CubicResize { get; set; }
     /// <summary>
@@ -34,6 +36,10 @@ public class ShaderToyShaderProperties : LayerPropertyGroup
     public FloatLayerProperty AudioAttack { get; set; }
     /// <summary>EMA alpha for falling edge (0 = instant, 0.99 = very slow).  Lower = bars snap back faster.</summary>
     public FloatLayerProperty AudioSmoothing { get; set; }
+    /// <summary>Audio capture source: 0=Render loopback, 1=Stereo Mix.</summary>
+    public IntLayerProperty AudioInputSource { get; set; }
+    /// <summary>WASAPI render endpoint id. Empty = current default multimedia render endpoint.</summary>
+    public LayerProperty<string> AudioDeviceId { get; set; }
     /// <summary>Lowest frequency shown (Hz).  Used by Max and Average modes.</summary>
     public IntLayerProperty AudioMinFreq { get; set; }
     /// <summary>Highest frequency shown (Hz).  Used by Max and Average modes.</summary>
@@ -49,10 +55,13 @@ public class ShaderToyShaderProperties : LayerPropertyGroup
         Height.DefaultValue               = 512;
         MaxFps.DefaultValue               = 10;
         EnableAudio.DefaultValue          = true;
+        StereoAudioTexture.DefaultValue   = false;
         CubicResize.DefaultValue          = false;
         AudioDbFloor.DefaultValue         = -50f;
         AudioAttack.DefaultValue          = 0.7f;
         AudioSmoothing.DefaultValue       = 0.5f;
+        AudioInputSource.DefaultValue     = 0; // Render loopback
+        AudioDeviceId.DefaultValue        = "";
         AudioMinFreq.DefaultValue         = 20;
         AudioMaxFreq.DefaultValue         = 20_000;
         AudioSpectrumMode.DefaultValue    = 0; // Max

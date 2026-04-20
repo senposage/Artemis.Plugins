@@ -109,6 +109,23 @@ public class PassEditorViewModel : ReactiveObject
         }
     }
 
+    // ------------------------------------------------------------------ auto-detect
+
+    /// <summary>
+    /// Scans the pass source for channel-type hints (e.g. "// iChannel0: noise")
+    /// and fills any channel currently set to <see cref="ChannelInputType.None"/>.
+    /// Existing non-None assignments are never overwritten.
+    /// </summary>
+    public void SuggestChannels()
+    {
+        if (!IsShader) return;
+        var hints = ShaderChannelHints.Detect(Source);
+        if (hints.TryGetValue(0, out var t0) && Ch0.Value == ChannelInputType.None) Ch0 = OptionFor(t0);
+        if (hints.TryGetValue(1, out var t1) && Ch1.Value == ChannelInputType.None) Ch1 = OptionFor(t1);
+        if (hints.TryGetValue(2, out var t2) && Ch2.Value == ChannelInputType.None) Ch2 = OptionFor(t2);
+        if (hints.TryGetValue(3, out var t3) && Ch3.Value == ChannelInputType.None) Ch3 = OptionFor(t3);
+    }
+
     // ------------------------------------------------------------------ export
 
     public ShaderPass ToShaderPass()

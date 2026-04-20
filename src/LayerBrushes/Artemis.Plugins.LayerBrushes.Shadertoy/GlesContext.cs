@@ -28,37 +28,48 @@ internal sealed class GlesContext : IDisposable
     {
         ShaderLogger.Log("EGL: Initialize start");
 
-        // Try GPU D3D11 first; fall back to WARP (CPU) if the GPU path fails.
-        // GPU is preferred: same ANGLE isolation (separate D3D11 device, no GLFW,
-        // no shared context) but orders of magnitude faster for complex shaders.
-        int[] dispAttribsGpu =
-        [
-            EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
-            EGL_NONE
-        ];
-        int[] dispAttribsWarp =
-        [
-            EGL_PLATFORM_ANGLE_TYPE_ANGLE,        EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
-            EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_WARP_ANGLE,
-            EGL_NONE
-        ];
-
         int major = 0, minor = 0;
-        _display = eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, 0, dispAttribsGpu);
-        bool useWarp = _display == EGL_NO_DISPLAY || !eglInitialize(_display, out major, out minor);
-        if (useWarp)
+
+        if (OperatingSystem.IsLinux())
         {
-            ShaderLogger.Log("EGL: GPU D3D11 unavailable, falling back to WARP");
-            _display = eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, 0, dispAttribsWarp);
-            ShaderLogger.Log($"EGL: WARP display=0x{_display:X} err=0x{eglGetError():X4}");
-            EglCheck(_display == EGL_NO_DISPLAY, "eglGetPlatformDisplayEXT (WARP)");
-            EglCheck(!eglInitialize(_display, out major, out minor), "eglInitialize (WARP)");
+            // Mesa native EGL — EGL_DEFAULT_DISPLAY lets the driver pick the best available
+            _display = eglGetDisplay(0);
+            ShaderLogger.Log($"EGL: Mesa display=0x{_display:X} err=0x{eglGetError():X4}");
+            EglCheck(_display == EGL_NO_DISPLAY, "eglGetDisplay (Mesa)");
+            EglCheck(!eglInitialize(_display, out major, out minor), "eglInitialize (Mesa)");
+            ShaderLogger.Log($"EGL: initialized v{major}.{minor} backend=Mesa");
         }
         else
         {
-            ShaderLogger.Log($"EGL: GPU D3D11 display=0x{_display:X}");
+            // ANGLE on Windows — try GPU D3D11 first, fall back to WARP (CPU)
+            int[] dispAttribsGpu =
+            [
+                EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
+                EGL_NONE
+            ];
+            int[] dispAttribsWarp =
+            [
+                EGL_PLATFORM_ANGLE_TYPE_ANGLE,        EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
+                EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_WARP_ANGLE,
+                EGL_NONE
+            ];
+
+            _display = eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, 0, dispAttribsGpu);
+            bool useWarp = _display == EGL_NO_DISPLAY || !eglInitialize(_display, out major, out minor);
+            if (useWarp)
+            {
+                ShaderLogger.Log("EGL: GPU D3D11 unavailable, falling back to WARP");
+                _display = eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, 0, dispAttribsWarp);
+                ShaderLogger.Log($"EGL: WARP display=0x{_display:X} err=0x{eglGetError():X4}");
+                EglCheck(_display == EGL_NO_DISPLAY, "eglGetPlatformDisplayEXT (WARP)");
+                EglCheck(!eglInitialize(_display, out major, out minor), "eglInitialize (WARP)");
+            }
+            else
+            {
+                ShaderLogger.Log($"EGL: GPU D3D11 display=0x{_display:X}");
+            }
+            ShaderLogger.Log($"EGL: initialized v{major}.{minor} backend={(useWarp ? "WARP" : "GPU D3D11")}");
         }
-        ShaderLogger.Log($"EGL: initialized v{major}.{minor} backend={(useWarp ? "WARP" : "GPU D3D11")}");
 
         int[] cfgAttribs =
         [

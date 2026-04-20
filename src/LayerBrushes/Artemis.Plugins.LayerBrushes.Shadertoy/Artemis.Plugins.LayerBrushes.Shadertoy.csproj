@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Platforms>x64</Platforms>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <RootNamespace>Artemis.Plugins.LayerBrushes.Shadertoy</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <Nullable>enable</Nullable>
@@ -14,12 +16,18 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <Reference Include="AvaloniaEdit">
+      <HintPath>C:\Program Files\Artemis\AvaloniaEdit.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
-  <!-- ANGLE DLLs (libEGL.dll + libGLESv2.dll) must be placed in native\ manually.
-       They are not committed to the repo — copy x64 builds from Chrome or Edge:
-         C:\Program Files\Google\Chrome\Application\<ver>\libEGL.dll
-         C:\Program Files\Google\Chrome\Application\<ver>\libGLESv2.dll
+  <!-- ANGLE DLLs (libEGL.dll + libGLESv2.dll) are OPTIONAL in native\.
+       At runtime the plugin auto-detects Edge or Chrome on the machine and
+       copies from there — no manual step required on a modern Windows install.
+       For dev/CI builds without a browser present, copy x64 builds manually:
+         C:\Program Files (x86)\Microsoft\Edge\Application\<ver>\libEGL.dll
+         C:\Program Files (x86)\Microsoft\Edge\Application\<ver>\libGLESv2.dll
        native\ is listed in .gitignore. -->
   <ItemGroup>
     <Content Include="native\libEGL.dll"    Link="libEGL.dll"    CopyToOutputDirectory="PreserveNewest" Condition="Exists('native\libEGL.dll')" />

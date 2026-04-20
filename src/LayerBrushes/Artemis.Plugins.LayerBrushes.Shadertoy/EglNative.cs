@@ -37,6 +37,11 @@ internal static class EglNative
     public static readonly nint EGL_NO_CONTEXT = 0;
     public static readonly nint EGL_NO_SURFACE = 0;
 
+    // Standard EGL display — used on Linux with Mesa
+    [DllImport(LIB, CallingConvention = CallingConvention.Winapi)]
+    public static extern nint eglGetDisplay(nint displayId);
+
+    // ANGLE extension — used on Windows to select D3D11 backend
     [DllImport(LIB, CallingConvention = CallingConvention.Winapi)]
     public static extern nint eglGetPlatformDisplayEXT(int platform, nint nativeDisplay, [In] int[] attribs);
 

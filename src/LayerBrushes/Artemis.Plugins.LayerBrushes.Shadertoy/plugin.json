@@ -1,13 +1,13 @@
 {
     "Guid": "A1B2C3D4-5E6F-7890-ABCD-EF1234567890",
     "Name": "Shader Toy",
-    "Description": "Renders Shadertoy GLSL shaders via ANGLE+D3D11. Paste any shader from shadertoy.com and it runs as-is.",
+    "Description": "Renders Shadertoy GLSL shaders. Paste any shader from shadertoy.com and it runs as-is.",
     "Author": "Legit-Su",
     "Icon": "React",
     "Version": "2.0.0.0",
     "Main": "Artemis.Plugins.LayerBrushes.Shadertoy.dll",
     "AutoEnableProperties": true,
     "RequiresAdmin": false,
-    "Platforms": "Windows",
+    "Platforms": "Windows,Linux",
     "MinimumVersion": "1.2025.1222.3"
 }

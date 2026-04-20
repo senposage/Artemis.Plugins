@@ -1,3 +1,4 @@
+#if WINDOWS
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -5,18 +6,19 @@ using System.Threading;
 namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 
 /// <summary>
-/// WinMM (waveIn) capture backend.  Used as a fallback when WASAPI loopback fails
-/// (e.g. a second WASAPI loopback client on the same endpoint receives no frames on
-/// some Realtek drivers).  WinMM uses the legacy Windows Wave API and works reliably
-/// with "Stereo Mix" capture devices on Realtek hardware.
+/// WinMM (waveIn) capture backend. Used only when the user explicitly selects
+/// Stereo Mix / WinMM mode.
 ///
-/// Tries to find a "Stereo Mix" / "What U Hear" recording device.  If none is found,
-/// falls back to WAVE_MAPPER (the default recording device, typically the microphone).
+/// This backend must bind a "Stereo Mix" / "What U Hear" recording device.
+/// If none is found, capture fails closed instead of opening the default microphone
+/// or any other default recording device.
 /// </summary>
 internal sealed unsafe class WinmmCapture : IDisposable
 {
-    // Invoked on the capture thread with mono float32 samples.
-    public Action<float[], int>? DataAvailable;
+    public int SampleRate => SAMPLE_RATE;
+
+    // Invoked on the capture thread with left/right float32 samples.
+    public Action<float[], float[], int>? DataAvailable;
 
     private IntPtr   _hWaveIn = IntPtr.Zero;
     private Thread?  _thread;
@@ -33,7 +35,6 @@ internal sealed unsafe class WinmmCapture : IDisposable
     private const int WHDR_DONE    = 0x00000001;
     private const int WHDR_INQUEUE = 0x00000010;
     private const int CALLBACK_NULL = 0;
-    private const uint WAVE_MAPPER  = 0xFFFFFFFFu;
 
     // WinMM WAVEHDR on x64: 48 bytes.
     private const int WAVEHDR_SIZE = 48;
@@ -41,8 +42,9 @@ internal sealed unsafe class WinmmCapture : IDisposable
     private readonly IntPtr[] _hdrs  = new IntPtr[2];
     private readonly IntPtr[] _datas = new IntPtr[2];
 
-    // Conversion scratch: up to BUF_FRAMES mono float samples.
-    private readonly float[] _mono = new float[BUF_FRAMES];
+    // Conversion scratch: up to BUF_FRAMES stereo float samples.
+    private readonly float[] _left = new float[BUF_FRAMES];
+    private readonly float[] _right = new float[BUF_FRAMES];
 
     // ------------------------------------------------------------------ public
 
@@ -51,8 +53,7 @@ internal sealed unsafe class WinmmCapture : IDisposable
         if (_hWaveIn != IntPtr.Zero) return;
 
         uint deviceId = FindStereoMixDevice();
-        ShaderLogger.Log($"WinmmCapture: opening device #{deviceId}" +
-            (deviceId == WAVE_MAPPER ? " (WAVE_MAPPER)" : $" '{GetDeviceName(deviceId)}'"));
+        ShaderLogger.Log($"WinmmCapture: opening Stereo Mix device #{deviceId} '{GetDeviceName(deviceId)}'");
 
         var wfx = new WAVEFORMATEX
         {
@@ -116,8 +117,6 @@ internal sealed unsafe class WinmmCapture : IDisposable
     private void CaptureLoop()
     {
         int emptyPolls = 0;
-        int deliveries = 0;
-
         while (!_stopping)
         {
             Thread.Sleep(5);
@@ -133,12 +132,7 @@ internal sealed unsafe class WinmmCapture : IDisposable
                 int recorded = Marshal.ReadInt32(_hdrs[i] + 12); // dwBytesRecorded at offset 12
 
                 if (recorded > 0)
-                {
                     Deliver(_datas[i], recorded);
-                    deliveries++;
-                    if (deliveries <= 5 || deliveries == 100)
-                        ShaderLogger.Log($"WinmmCapture.Deliver #{deliveries}: bytes={recorded}");
-                }
 
                 // Re-queue the buffer.
                 PrepareAndQueue(i);
@@ -176,19 +170,18 @@ internal sealed unsafe class WinmmCapture : IDisposable
 
     private void Deliver(IntPtr data, int byteCount)
     {
-        // Stereo 16-bit PCM → mono float32
+        // Stereo 16-bit PCM to left/right float32.
         int frames = byteCount / (CHANNELS * (BITS / 8));
-        if (frames > _mono.Length) frames = _mono.Length;
+        if (frames > _left.Length) frames = _left.Length;
 
         var src = (short*)data;
         for (int i = 0; i < frames; i++)
         {
-            float s = 0f;
-            for (int ch = 0; ch < CHANNELS; ch++) s += src[i * CHANNELS + ch] / 32768f;
-            _mono[i] = s / CHANNELS;
+            _left[i] = src[i * CHANNELS] / 32768f;
+            _right[i] = src[i * CHANNELS + 1] / 32768f;
         }
 
-        DataAvailable?.Invoke(_mono, frames);
+        DataAvailable?.Invoke(_left, _right, frames);
     }
 
     // ------------------------------------------------------------------ device selection
@@ -212,8 +205,7 @@ internal sealed unsafe class WinmmCapture : IDisposable
             }
         }
 
-        ShaderLogger.Log("WinmmCapture: no Stereo Mix found, using WAVE_MAPPER (default recording device)");
-        return WAVE_MAPPER;
+        throw new InvalidOperationException("Stereo Mix / WinMM capture was selected, but no Stereo Mix / What U Hear device was found");
     }
 
     private static string GetDeviceName(uint id)
@@ -253,3 +245,4 @@ internal sealed unsafe class WinmmCapture : IDisposable
     [DllImport("winmm.dll")] static extern uint   waveInGetNumDevs();
     [DllImport("winmm.dll")] static extern int    waveInGetDevCapsA(uint uDeviceID, IntPtr pwic, uint cbwic);
 }
+#endif
