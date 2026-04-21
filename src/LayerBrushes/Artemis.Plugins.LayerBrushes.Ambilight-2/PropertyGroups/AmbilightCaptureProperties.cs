@@ -90,6 +90,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups
 
             if (OperatingSystem.IsWindows())
                 MonitorDevicePath.BaseValue = MonitorIdentifier.GetMonitorDevicePath(display.DeviceName) ?? "";
+            else if (OperatingSystem.IsLinux())
+                MonitorDevicePath.BaseValue = LinuxMonitorIdentifier.GetMonitorKey(display) ?? "";
 
             if (includeRegion)
             {

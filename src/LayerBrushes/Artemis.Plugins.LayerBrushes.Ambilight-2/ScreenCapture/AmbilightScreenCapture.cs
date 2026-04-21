@@ -96,6 +96,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         #region Instance fields
 
         private readonly IScreenCapture _screenCapture;
+        private readonly object _captureLock = new();
 
         private int _zoneCount;
         private volatile bool _captureError;
@@ -104,6 +105,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         private volatile int _fpsLimit;
 
         private bool _ddcEverWorked;
+        private DateTimeOffset _captureBackoffUntil = DateTimeOffset.MinValue;
+        private bool _restartAfterBackoff;
+        private int _captureBackoffSeconds = 2;
 
         private Task? _updateTask;
         private CancellationTokenSource? _cancellationTokenSource;
@@ -128,8 +132,10 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         {
             _screenCapture = screenCapture;
 
+#if WINDOWS
             if (screenCapture is DX11ScreenCapture dx11)
                 dx11.Timeout = 100;
+#endif
 
             s_instances[Display.DeviceName] = this;
 
@@ -158,8 +164,20 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         {
             s_instances.TryRemove(Display.DeviceName, out _);
             _cancellationTokenSource?.Cancel();
+
+            Task? updateTask = _updateTask;
             _updateTask = null;
-            _screenCapture.Dispose();
+            if (updateTask != null && Task.CurrentId != updateTask.Id)
+            {
+                try { updateTask.Wait(TimeSpan.FromSeconds(2)); }
+                catch { /* Best effort: the capture lock below prevents disposal races. */ }
+            }
+
+            lock (_captureLock)
+                _screenCapture.Dispose();
+
+            _cancellationTokenSource?.Dispose();
+            _cancellationTokenSource = null;
         }
 
         #endregion
@@ -176,6 +194,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         {
             _suspended = false;
             _captureError = false;
+            _restartAfterBackoff = false;
+            _captureBackoffUntil = DateTimeOffset.MinValue;
+            _captureBackoffSeconds = 2;
             if (clearDisplayOffState)
                 _displayOff = false;
             Logger.Debug("Capture resumed for {Display}", Display.DeviceName);
@@ -184,8 +205,15 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         public void SetFpsLimit(int fps)
         {
             _fpsLimit = Math.Max(0, fps);
-            if (_screenCapture is Wgc.WgcScreenCapture wgc)
-                wgc.SetFpsLimit(_fpsLimit);
+            lock (_captureLock)
+            {
+                if (_screenCapture is IConfigurableCaptureFps configurableCapture)
+                    configurableCapture.SetFpsLimit(_fpsLimit);
+#if WINDOWS
+                if (_screenCapture is Wgc.WgcScreenCapture wgc)
+                    wgc.SetFpsLimit(_fpsLimit);
+#endif
+            }
         }
 
         #endregion
@@ -201,6 +229,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         ///   NotPresent     → physical disconnect; set _displayOff; update s_displayOff.
         ///   DdcUnavailable + DDC previously worked → deep sleep; set _displayOff; update s_displayOff.
         /// </summary>
+        [System.Runtime.Versioning.SupportedOSPlatform("windows")]
         private void CheckDisplayPowerState()
         {
             switch (MonitorPowerState.QueryPowerState(Display.DeviceName))
@@ -282,6 +311,34 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                     continue;
                 }
 
+                DateTimeOffset now = DateTimeOffset.UtcNow;
+                if (_captureBackoffUntil > now)
+                {
+                    Thread.Sleep(Math.Min(500, Math.Max(50, (int)(_captureBackoffUntil - now).TotalMilliseconds)));
+                    continue;
+                }
+
+                if (_restartAfterBackoff)
+                {
+                    try
+                    {
+                        Logger.Information("Restarting screen capture for {Display} after GPU/capture backoff", Display.DeviceName);
+                        lock (_captureLock)
+                            _screenCapture.Restart();
+                    }
+                    catch (Exception restartEx)
+                    {
+                        Logger.Debug(restartEx, "Restart after backoff failed for {Display}, will keep retrying", Display.DeviceName);
+                        _captureBackoffUntil = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(Math.Min(_captureBackoffSeconds, 60));
+                        _captureBackoffSeconds = Math.Min(_captureBackoffSeconds * 2, 60);
+                        continue;
+                    }
+                    finally
+                    {
+                        _restartAfterBackoff = false;
+                    }
+                }
+
                 // FPS limiting
                 int fpsLimit = _fpsLimit;
                 if (fpsLimit > 0)
@@ -298,10 +355,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 try
                 {
-                    bool success = _screenCapture.CaptureScreen();
+                    bool success;
+                    lock (_captureLock)
+                        success = _screenCapture.CaptureScreen();
                     Updated?.Invoke(this, new ScreenCaptureUpdatedEventArgs(success));
                     consecutiveErrors = 0;
                     _captureError = false;
+                    _captureBackoffSeconds = 2;
+                    _captureBackoffUntil = DateTimeOffset.MinValue;
                 }
                 catch (OperationCanceledException)
                 {
@@ -311,9 +372,23 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 {
                     _captureError = true;
                     consecutiveErrors++;
+                    bool likelyGpuFault = IsLikelyGpuCaptureFault(ex);
 
                     if (consecutiveErrors == 1)
                         Logger.Warning(ex, "Screen capture failed for {Display}, will retry", Display.DeviceName);
+
+                    if (likelyGpuFault)
+                    {
+                        int backoffSeconds = Math.Min(_captureBackoffSeconds, 60);
+                        _captureBackoffSeconds = Math.Min(_captureBackoffSeconds * 2, 60);
+                        _captureBackoffUntil = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(backoffSeconds);
+                        _restartAfterBackoff = true;
+                        Logger.Warning(ex,
+                            "GPU/display capture fault detected for {Display}; backing off capture for {Seconds}s to avoid driver reset loops",
+                            Display.DeviceName,
+                            backoffSeconds);
+                        continue;
+                    }
 
                     Thread.Sleep(Math.Min(consecutiveErrors * 200, 2000));
 
@@ -322,7 +397,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                         try
                         {
                             Logger.Information("Attempting to restart screen capture for {Display}", Display.DeviceName);
-                            _screenCapture.Restart();
+                            lock (_captureLock)
+                                _screenCapture.Restart();
                         }
                         catch (Exception restartEx)
                         {
@@ -333,9 +409,32 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             }
         }
 
+        private static bool IsLikelyGpuCaptureFault(Exception exception)
+        {
+            if (!OperatingSystem.IsWindows())
+                return false;
+
+            for (Exception? current = exception; current != null; current = current.InnerException)
+            {
+                string text = $"{current.GetType().FullName} {current.Message}";
+                if (text.Contains("DXGI_ERROR_DEVICE_REMOVED", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("DXGI_ERROR_DEVICE_RESET", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("DXGI_ERROR_DRIVER_INTERNAL_ERROR", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("device removed", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("device lost", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("DeviceRemovedReason", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("0x887A0005", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("0x887A0006", StringComparison.OrdinalIgnoreCase) ||
+                    text.Contains("0x887A0020", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
         ICaptureZone IScreenCapture.RegisterCaptureZone(int x, int y, int width, int height, int downscaleLevel)
         {
-            lock (_screenCapture)
+            lock (_captureLock)
             {
                 ICaptureZone zone = _screenCapture.RegisterCaptureZone(x, y, width, height, downscaleLevel);
                 _zoneCount++;
@@ -353,7 +452,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         public bool UnregisterCaptureZone(ICaptureZone captureZone)
         {
-            lock (_screenCapture)
+            lock (_captureLock)
             {
                 bool result = _screenCapture.UnregisterCaptureZone(captureZone);
                 if (result) _zoneCount--;
@@ -370,13 +469,17 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         public void UpdateCaptureZone(ICaptureZone captureZone, int? x = null, int? y = null, int? width = null, int? height = null, int? downscaleLevel = null)
         {
-            lock (_screenCapture)
+            lock (_captureLock)
                 _screenCapture.UpdateCaptureZone(captureZone, x, y, width, height, downscaleLevel);
         }
 
         public bool CaptureScreen() => false;
 
-        public void Restart() => _screenCapture.Restart();
+        public void Restart()
+        {
+            lock (_captureLock)
+                _screenCapture.Restart();
+        }
 
         #endregion
 

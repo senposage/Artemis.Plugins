@@ -51,7 +51,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         public override void Update(double deltaTime)
         {
-            if (_captureZone == null) return;
+            if (_captureZone == null)
+            {
+                if (_screenCaptureService != null)
+                    RecreateCaptureZone();
+
+                if (_captureZone == null)
+                    return;
+            }
 
             int frameSkip = Properties.Capture.FrameSkip;
             if (frameSkip > 0)
@@ -431,6 +438,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 // Try to resolve display by stable monitor path first (survives display ID shifts)
                 if (!defaulting && OperatingSystem.IsWindows() && !string.IsNullOrEmpty(props.MonitorDevicePath.CurrentValue))
                     _display = MonitorIdentifier.FindDisplayByMonitorPath(_screenCaptureService, props.MonitorDevicePath.CurrentValue);
+                else if (!defaulting && OperatingSystem.IsLinux() && !string.IsNullOrEmpty(props.MonitorDevicePath.CurrentValue))
+                    _display = LinuxMonitorIdentifier.FindDisplayByMonitorKey(_screenCaptureService, props.MonitorDevicePath.CurrentValue);
 
                 if (_display == null)
                 {
@@ -467,6 +476,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 // Apply FPS limit to the capture loop
                 if (screenCapture is AmbilightScreenCapture ambilightCapture)
                     ambilightCapture.SetFpsLimit(props.CaptureFpsLimit);
+
             }
             finally
             {

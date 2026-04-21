@@ -7,6 +7,7 @@ using System.Reactive.Disposables.Fluent;
 using System.Threading.Tasks;
 using Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups;
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
+using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
 using Artemis.UI.Shared.LayerBrushes;
 using Artemis.UI.Shared.Services;
 using Artemis.UI.Shared.Services.Builders;
@@ -14,11 +15,16 @@ using Avalonia.Threading;
 using DynamicData;
 using ReactiveUI;
 using ScreenCapture.NET;
+using Serilog;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.Screens;
 
 public class CapturePropertiesViewModel : BrushConfigurationViewModel
 {
+    private static readonly ILogger Logger = Log.ForContext<CapturePropertiesViewModel>();
+    private static readonly TimeSpan ScreenCaptureServiceWaitTimeout = TimeSpan.FromSeconds(25);
+    private static readonly TimeSpan ScreenCaptureServicePollInterval = TimeSpan.FromMilliseconds(250);
+
     private readonly ObservableAsPropertyHelper<int> _maxHeight;
     private readonly ObservableAsPropertyHelper<int> _maxWidth;
     private readonly ObservableAsPropertyHelper<int> _maxX;
@@ -70,6 +76,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         AmbilightLayerBrush = layerBrush;
         CaptureScreens = new ObservableCollection<CaptureScreenViewModel>();
         ResetRegion = ReactiveCommand.Create(ExecuteResetRegion);
+        ResetLinuxPortalPermission = ReactiveCommand.CreateFromTask(ExecuteResetLinuxPortalPermission);
 
         _maxX = this.WhenAnyValue(vm => vm.Width, vm => vm.SelectedCaptureScreen, (width, screen) => (screen?.Display.Width ?? 0) - width).ToProperty(this, vm => vm.MaxX);
         _maxY = this.WhenAnyValue(vm => vm.Height, vm => vm.SelectedCaptureScreen, (height, screen) => (screen?.Display.Height ?? 0) - height).ToProperty(this, vm => vm.MaxY);
@@ -114,6 +121,8 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     }
 
     public ReactiveCommand<Unit, Unit> ResetRegion { get; }
+    public ReactiveCommand<Unit, Unit> ResetLinuxPortalPermission { get; }
+    public bool ShowLinuxPortalControls => OperatingSystem.IsLinux();
 
     public int X
     {
@@ -261,7 +270,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         set => RaiseAndSetIfChanged(ref _enableValidation, value);
     }
 
-    private IScreenCaptureService _screenCaptureService => AmbilightBootstrapper.ScreenCaptureService!;
+    private static IScreenCaptureService? ScreenCaptureService => AmbilightBootstrapper.ScreenCaptureService;
 
     public void Load()
     {
@@ -338,6 +347,8 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
 
             if (OperatingSystem.IsWindows())
                 _properties.MonitorDevicePath.SetCurrentValue(MonitorIdentifier.GetMonitorDevicePath(SelectedCaptureScreen.Display.DeviceName) ?? "");
+            else if (OperatingSystem.IsLinux())
+                _properties.MonitorDevicePath.SetCurrentValue(LinuxMonitorIdentifier.GetMonitorKey(SelectedCaptureScreen.Display) ?? "");
 
             _properties.CaptureFullScreen.SetCurrentValue(X == 0 &&
                                                           Y == 0 &&
@@ -352,8 +363,22 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
 
     private async void Initialize(CompositeDisposable d)
     {
-        if (!await CreateCaptureScreens())
+        try
+        {
+            if (!await CreateCaptureScreens())
+                return;
+        }
+        catch (Exception ex)
+        {
+            Logger.Error(ex, "Failed to initialize Ambilight capture configuration");
+            await _windowService.CreateContentDialog()
+                .WithTitle("Screen capture unavailable")
+                .WithContent($"The plugin could not initialize screen capture settings: {ex.GetBaseException().Message}")
+                .WithDefaultButton(ContentDialogButton.Close)
+                .ShowAsync();
+            RequestClose();
             return;
+        }
 
         Load();
         _saveOnChange = true;
@@ -368,8 +393,21 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
 
     private async Task<bool> CreateCaptureScreens()
     {
-        CaptureScreens.AddRange(_screenCaptureService.GetGraphicsCards()
-            .SelectMany(gg => _screenCaptureService.GetDisplays(gg))
+        IScreenCaptureService? screenCaptureService = await WaitForScreenCaptureService();
+        if (screenCaptureService == null)
+        {
+            await _windowService.CreateContentDialog()
+                .WithTitle("Screen capture still starting")
+                .WithContent("The Linux screen capture backend is still waiting for the desktop portal, or it failed to start. Try opening these settings again after the portal prompt/timeout finishes.")
+                .WithDefaultButton(ContentDialogButton.Close)
+                .ShowAsync();
+
+            RequestClose();
+            return false;
+        }
+
+        CaptureScreens.AddRange(screenCaptureService.GetGraphicsCards()
+            .SelectMany(gg => screenCaptureService.GetDisplays(gg))
             .Select(d => new CaptureScreenViewModel(d))
             .ToList());
 
@@ -391,6 +429,10 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
             if (monitorMap.TryGetValue(_properties.MonitorDevicePath.CurrentValue, out string? currentAdapterName))
                 matched = CaptureScreens.FirstOrDefault(s => s.Display.DeviceName.Equals(currentAdapterName, StringComparison.OrdinalIgnoreCase));
         }
+        else if (OperatingSystem.IsLinux() && !string.IsNullOrEmpty(_properties.MonitorDevicePath.CurrentValue))
+        {
+            matched = CaptureScreens.FirstOrDefault(s => LinuxMonitorIdentifier.GetMonitorKey(s.Display)?.Equals(_properties.MonitorDevicePath.CurrentValue, StringComparison.OrdinalIgnoreCase) == true);
+        }
 
         // Fall back to legacy GPU + DisplayName matching
         matched ??= CaptureScreens.FirstOrDefault(s => s.Display.GraphicsCard.VendorId == _properties.GraphicsCardVendorId &&
@@ -404,10 +446,34 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
 
     private void Update()
     {
+        if (ScreenCaptureService == null)
+            return;
+
         foreach (CaptureScreenViewModel captureScreenViewModel in CaptureScreens)
             captureScreenViewModel.Update();
         CaptureRegionEditor?.Update();
         CaptureRegionDisplay?.Update();
+    }
+
+    private static async Task<IScreenCaptureService?> WaitForScreenCaptureService()
+    {
+        IScreenCaptureService? screenCaptureService = ScreenCaptureService;
+        if (screenCaptureService != null)
+            return screenCaptureService;
+
+        if (!OperatingSystem.IsLinux())
+            return null;
+
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + ScreenCaptureServiceWaitTimeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await Task.Delay(ScreenCaptureServicePollInterval);
+            screenCaptureService = ScreenCaptureService;
+            if (screenCaptureService != null)
+                return screenCaptureService;
+        }
+
+        return null;
     }
 
     private void ExecuteResetRegion()
@@ -421,6 +487,16 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         Height = SelectedCaptureScreen.Display.Height;
 
         Save();
+    }
+
+    private async Task ExecuteResetLinuxPortalPermission()
+    {
+        PortalPipeWireSession.ResetStoredRestoreToken();
+        await _windowService.CreateContentDialog()
+            .WithTitle("Linux capture permission reset")
+            .WithContent("The saved ScreenCast portal permission was cleared. Restart Artemis to request monitor sharing again.")
+            .WithDefaultButton(ContentDialogButton.Close)
+            .ShowAsync();
     }
 
     private void OnSelectedCaptureScreenChanged(CaptureScreenViewModel? selected)

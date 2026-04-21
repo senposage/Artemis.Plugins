@@ -6,13 +6,13 @@ on:
     branches:
       - master
     paths:
-      - 'src/LayerBrushes/Artemis.Plugins.LayerBrushes.Ambilight/**'
+      - 'src/LayerBrushes/Artemis.Plugins.LayerBrushes.Ambilight-2/**'
 
 jobs:
   upload:
     uses: ./.github/workflows/plugin-upload.yml
     with:
-          projectPath: 'src/LayerBrushes/Artemis.Plugins.LayerBrushes.Ambilight/Artemis.Plugins.LayerBrushes.Ambilight.csproj'
+          projectPath: 'src/LayerBrushes/Artemis.Plugins.LayerBrushes.Ambilight-2/Artemis.Plugins.LayerBrushes.AmbilightV2.csproj'
     secrets:
       WORKSHOP_PAT: ${{ secrets.WORKSHOP_PAT }}
 

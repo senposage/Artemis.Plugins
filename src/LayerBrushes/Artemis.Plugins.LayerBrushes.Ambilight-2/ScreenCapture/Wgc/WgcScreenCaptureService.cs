@@ -1,3 +1,4 @@
+#if WINDOWS
 using System;
 using System.Collections.Generic;
 using System.Runtime.Versioning;
@@ -92,3 +93,5 @@ internal sealed class WgcScreenCaptureService : IScreenCaptureService
         _enumerationService.Dispose();
     }
 }
+
+#endif

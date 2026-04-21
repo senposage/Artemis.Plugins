@@ -3,6 +3,8 @@
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <Platforms>x64</Platforms>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <RootNamespace>Artemis.Plugins.LayerBrushes.Ambilight</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -10,19 +12,30 @@
 
   <ItemGroup>
     <Content Include="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="tools\linux\artemis-portal-setup.sh" Link="linux\artemis-portal-setup.sh" CopyToOutputDirectory="PreserveNewest" />
     <PackageReference Include="ArtemisRGB.Plugins.BuildTask" Version="2.0.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <PackageReference Include="Tmds.DBus" Version="0.92.0" />
   </ItemGroup>
 
   <!-- Project-specific dependencies (not provided by Directory.Build.props) -->
   <ItemGroup>
     <PackageReference Include="ScreenCapture.NET" Version="3.0.0" />
-    <PackageReference Include="ScreenCapture.NET.DX11" Version="3.0.0" />
     <PackageReference Include="ScreenCapture.NET.X11" Version="3.0.0" />
+    <PackageReference Include="ScreenCapture.NET.DX11" Version="3.0.0" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.5.0" />
     <PackageReference Include="Microsoft.Win32.SystemEvents" Version="10.0.1" />
   </ItemGroup>
+
+
+  <!-- Force-copy Microsoft.Win32.SystemEvents into the output so it's present when
+       the plugin is loaded on Linux (it's inbox on Windows and normally not copied). -->
+  <Target Name="CopySystemEventsForLinux" AfterTargets="Build">
+    <Copy SourceFiles="$(NuGetPackageRoot)microsoft.win32.systemevents\10.0.1\runtimes\win\lib\net10.0\Microsoft.Win32.SystemEvents.dll"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

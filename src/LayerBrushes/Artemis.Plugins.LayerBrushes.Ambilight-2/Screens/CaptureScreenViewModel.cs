@@ -22,6 +22,8 @@ public class CaptureScreenViewModel : ActivatableViewModelBase
 
         if (OperatingSystem.IsWindows())
             MonitorDevicePath = MonitorIdentifier.GetMonitorDevicePath(display.DeviceName);
+        else if (OperatingSystem.IsLinux())
+            MonitorDevicePath = LinuxMonitorIdentifier.GetMonitorKey(display);
 
         this.WhenActivated(d => Disposable.Create(() => DisplayPreview.Dispose()).DisposeWith(d));
     }

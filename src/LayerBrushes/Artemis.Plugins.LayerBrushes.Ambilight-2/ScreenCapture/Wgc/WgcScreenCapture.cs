@@ -1,3 +1,4 @@
+#if WINDOWS
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -462,3 +463,5 @@ internal sealed class WgcScreenCapture : IScreenCapture
 
     #endregion
 }
+
+#endif

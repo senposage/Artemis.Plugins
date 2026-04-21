@@ -1,9 +1,17 @@
 using System;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Artemis.Core;
 using Artemis.Core.Services;
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
+using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
+#if WINDOWS
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wgc;
+#endif
+using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wlroots;
 using Microsoft.Win32;
 using ScreenCapture.NET;
 using Serilog;
@@ -17,6 +25,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         private IRenderService? _renderService;
         private PluginFeatureInfo? _brushProvider;
         private WindowsDisplayStateMonitor? _displayStateMonitor;
+        private CancellationTokenSource? _screenCaptureInitCancellation;
 
         // Debounce DisplaySettingsChanged: Windows fires multiple events as it works through a
         // mode switch (resolution change, topology reconfigure, power state). Waiting 5 seconds
@@ -28,6 +37,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         #region Properties & Fields
 
         internal static AmbilightScreenCaptureService? ScreenCaptureService { get; private set; }
+        private static readonly object ScreenCaptureServiceLock = new();
 
         #endregion
 
@@ -40,8 +50,26 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             _renderService = plugin.Resolve<IRenderService>();
             _brushProvider = plugin.GetFeatureInfo<AmbilightLayerBrushProvider>();
 
-            IScreenCaptureService screenCaptureService = CreateScreenCaptureService();
-            ScreenCaptureService ??= new AmbilightScreenCaptureService(screenCaptureService);
+            if (OperatingSystem.IsLinux())
+            {
+                AmbilightLinuxDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(),
+                    $"plugin enabled; fallback diagnostics at {AmbilightLinuxDiagnostics.LogPath}");
+                _logger?.Information("Starting Linux screen capture service initialization in the background");
+                _screenCaptureInitCancellation = new CancellationTokenSource();
+                _ = Task.Run(() => InitializeLinuxScreenCaptureServiceAsync(plugin, _screenCaptureInitCancellation.Token));
+            }
+            else
+            {
+            try
+            {
+                IScreenCaptureService screenCaptureService = CreateScreenCaptureService();
+                SetScreenCaptureService(new AmbilightScreenCaptureService(screenCaptureService));
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error(ex, "Screen capture service unavailable — plugin will load but capture is disabled");
+            }
+            }
             if (OperatingSystem.IsWindows())
             {
                 // DisplaySettingsChanging fires BEFORE the change - suspend capture to prevent
@@ -56,6 +84,10 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         public override void OnPluginDisabled(Plugin plugin)
         {
+            _screenCaptureInitCancellation?.Cancel();
+            _screenCaptureInitCancellation?.Dispose();
+            _screenCaptureInitCancellation = null;
+
             _displaySettledTimer?.Dispose();
             _displaySettledTimer = null;
 
@@ -76,10 +108,71 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
         }
 
-        private static IScreenCaptureService CreateScreenCaptureService()
+        private async Task InitializeScreenCaptureServiceAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Yield();
+                IScreenCaptureService screenCaptureService = CreateScreenCaptureService(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var ambilightScreenCaptureService = new AmbilightScreenCaptureService(screenCaptureService);
+                if (!SetScreenCaptureService(ambilightScreenCaptureService))
+                {
+                    ambilightScreenCaptureService.Dispose();
+                    return;
+                }
+
+                AmbilightLinuxDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(), "screen capture service initialized");
+                _logger?.Information("Linux screen capture service initialized");
+                RequestImmediateRender();
+            }
+            catch (OperationCanceledException)
+            {
+                _logger?.Debug("Linux screen capture service initialization was cancelled");
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error(ex, "Screen capture service unavailable - plugin will load but capture is disabled");
+            }
+        }
+
+        private async Task InitializeLinuxScreenCaptureServiceAsync(Plugin plugin, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Yield();
+                ShowLinuxFirstRunPromptIfNeeded(plugin);
+                cancellationToken.ThrowIfCancellationRequested();
+                await InitializeScreenCaptureServiceAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger?.Debug("Linux screen capture service initialization was cancelled");
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error(ex, "Linux screen capture service initialization failed before capture service creation");
+            }
+        }
+
+        private static bool SetScreenCaptureService(AmbilightScreenCaptureService screenCaptureService)
+        {
+            lock (ScreenCaptureServiceLock)
+            {
+                if (ScreenCaptureService != null)
+                    return false;
+
+                ScreenCaptureService = screenCaptureService;
+                return true;
+            }
+        }
+
+        private static IScreenCaptureService CreateScreenCaptureService(CancellationToken cancellationToken = default)
         {
             if (OperatingSystem.IsWindows())
             {
+#if WINDOWS
                 try
                 {
                     if (WgcScreenCaptureService.IsSupported())
@@ -92,13 +185,86 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 {
                     Log.ForContext<AmbilightBootstrapper>().Warning(ex, "WGC initialization failed, falling back to DX11");
                 }
-
+#endif
                 Log.ForContext<AmbilightBootstrapper>().Information("Using DX11 Desktop Duplication backend");
                 return new DX11ScreenCaptureService();
             }
 
-            return new X11ScreenCaptureService();
+            if (OperatingSystem.IsLinux())
+            {
+                Exception? portalFailure = null;
+                Exception? wlrootsFailure = null;
+
+                AmbilightLinuxDiagnostics.Write(Log.ForContext<AmbilightBootstrapper>(),
+                    $"creating Linux capture service; WAYLAND_DISPLAY={Environment.GetEnvironmentVariable("WAYLAND_DISPLAY") ?? "(not set)"} DBUS_SESSION_BUS_ADDRESS={Environment.GetEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS") ?? "(not set)"}");
+                Log.ForContext<AmbilightBootstrapper>().Information(
+                    "Linux: WAYLAND_DISPLAY={WD} DBUS_SESSION_BUS_ADDRESS={DB}",
+                    Environment.GetEnvironmentVariable("WAYLAND_DISPLAY") ?? "(not set)",
+                    Environment.GetEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS") ?? "(not set)");
+
+                AllowPortalProcessInspection();
+
+                try
+                {
+                    if (PortalPipeWireScreenCaptureService.IsSupported(out string? portalUnsupportedReason))
+                    {
+                        AmbilightLinuxDiagnostics.Write(Log.ForContext<AmbilightBootstrapper>(), "attempting PipeWire portal backend");
+                        Log.ForContext<AmbilightBootstrapper>().Information("Attempting PipeWire portal backend");
+                        return new PortalPipeWireScreenCaptureService(cancellationToken);
+                    }
+
+                    portalFailure = new PlatformNotSupportedException($"PipeWire portal is not supported: {portalUnsupportedReason}");
+                    AmbilightLinuxDiagnostics.Write(Log.ForContext<AmbilightBootstrapper>(), $"PipeWire portal unavailable: {portalUnsupportedReason}");
+                    Log.ForContext<AmbilightBootstrapper>().Information("PipeWire portal unavailable: {Reason}", portalUnsupportedReason);
+                }
+                catch (Exception ex)
+                {
+                    portalFailure = ex;
+                    AmbilightLinuxDiagnostics.Write(Log.ForContext<AmbilightBootstrapper>(), $"PipeWire portal failed: {ex.GetBaseException().Message}");
+                    Log.ForContext<AmbilightBootstrapper>().Warning(ex, "PipeWire portal failed, trying wlroots");
+                }
+
+                try
+                {
+                    if (WlrootsScreenCaptureService.IsSupported(out string? wlrootsUnsupportedReason))
+                    {
+                        Log.ForContext<AmbilightBootstrapper>().Information("Attempting wlroots backend");
+                        return new WlrootsScreenCaptureService();
+                    }
+
+                    wlrootsFailure = new PlatformNotSupportedException($"wlroots is not supported: {wlrootsUnsupportedReason}");
+                    AmbilightLinuxDiagnostics.Write(Log.ForContext<AmbilightBootstrapper>(), $"wlroots unavailable: {wlrootsUnsupportedReason}");
+                    Log.ForContext<AmbilightBootstrapper>().Information("wlroots unavailable: {Reason}", wlrootsUnsupportedReason);
+                }
+                catch (Exception ex)
+                {
+                    wlrootsFailure = ex;
+                    Log.ForContext<AmbilightBootstrapper>().Warning(ex, "wlroots failed");
+                }
+
+                throw new PlatformNotSupportedException(
+                    "No Linux screen capture backend available. " +
+                    "PipeWire portal requires: xdg-desktop-portal + a compositor backend (xdg-desktop-portal-gnome/kde/hyprland/wlr) + gstreamer + gst-plugin-pipewire. " +
+                    "wlroots requires: grim + wlr-randr/swaymsg/hyprctl. " +
+                    $"Portal error: {portalFailure?.GetBaseException().Message ?? "not attempted"}. " +
+                    $"wlroots error: {wlrootsFailure?.GetBaseException().Message ?? "not attempted"}.",
+                    portalFailure ?? wlrootsFailure);
+            }
+
+            Log.ForContext<AmbilightBootstrapper>().Information("Using X11 backend");
+            try
+            {
+                var svc = new X11ScreenCaptureService();
+                Log.ForContext<AmbilightBootstrapper>().Information("X11 backend created successfully");
+                return svc;
+            }
+            catch (Exception ex)
+            {
+                Log.ForContext<AmbilightBootstrapper>().Error(ex, "X11 backend creation failed");
+                throw;
+            }
         }
+
 
         private void SystemEventsOnDisplaySettingsChanging(object? sender, EventArgs e)
         {
@@ -201,5 +367,169 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         }
 
         #endregion
+
+        /// <summary>
+        /// On first Linux load, writes a prominent notice telling the user to run the
+        /// bundled artemis-portal-setup.sh script. Artemis does not currently ship a
+        /// .desktop entry on Linux, which XDG portal screen cast requires to identify
+        /// the calling app. The script creates one under ~/.local/share/applications/
+        /// and a systemd-run launcher that passes the Wayland/DBus session env vars
+        /// through to the Artemis process.
+        /// </summary>
+        private void ShowLinuxFirstRunPromptIfNeeded(Plugin plugin)
+        {
+            try
+            {
+                string stamp = Path.Combine(plugin.Directory.FullName, ".linux-setup-acknowledged");
+                if (File.Exists(stamp))
+                    return;
+
+                string scriptPath = Path.Combine(plugin.Directory.FullName, "linux", "artemis-portal-setup.sh");
+                string? artemisExe = Environment.ProcessPath;
+
+                bool setupOk = TryRunLinuxSetupScript(scriptPath, artemisExe);
+
+                string msg = setupOk
+                    ? "=== Ambilight v2 Linux first-run setup ===\n" +
+                      "The plugin just ran artemis-portal-setup.sh and created a new\n" +
+                      "desktop entry at ~/.local/share/applications/org.artemisrgb.Artemis.desktop\n" +
+                      "with a launcher that passes WAYLAND_DISPLAY/DBUS_SESSION_BUS_ADDRESS\n" +
+                      "through so the XDG portal can identify Artemis.\n\n" +
+                      "!!! ACTION REQUIRED !!!\n" +
+                      "FULLY CLOSE Artemis now and relaunch it via the NEW shortcut the\n" +
+                      "script just created (not the one Artemis installed, and not the\n" +
+                      "binary directly). From the app menu, or via:\n\n" +
+                      "  gtk-launch org.artemisrgb.Artemis\n\n" +
+                      "Launching the Artemis binary directly, or launching via Artemis's\n" +
+                      "own shortcut, BYPASSES the portal-compatible desktop entry. You\n" +
+                      "WILL NOT get the screen sharing permission prompt from your\n" +
+                      "compositor, and screen capture WILL NOT work.\n\n" +
+                      "Delete this plugin's .linux-setup-acknowledged file to re-run\n" +
+                      "the setup next time."
+                    : "=== Ambilight v2 Linux first-run setup ===\n" +
+                      "The plugin tried to run artemis-portal-setup.sh automatically but\n" +
+                      "it failed (see preceding log lines). Run it manually:\n\n" +
+                      $"  chmod +x \"{scriptPath}\"\n" +
+                      $"  \"{scriptPath}\" \"{artemisExe ?? "/path/to/Artemis"}\"\n\n" +
+                      "Then FULLY CLOSE Artemis and relaunch it via the newly-created\n" +
+                      "shortcut (not the Artemis-installed one, not the binary directly),\n" +
+                      "or via: gtk-launch org.artemisrgb.Artemis\n\n" +
+                      "Launching Artemis any other way BYPASSES the portal-compatible\n" +
+                      "desktop entry. You WILL NOT get the screen sharing permission\n" +
+                      "prompt from your compositor, and screen capture WILL NOT work.\n\n" +
+                      "Delete this plugin's .linux-setup-acknowledged file to re-try.";
+
+                _logger?.Warning(msg);
+                AmbilightLinuxDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(), msg);
+
+                if (setupOk)
+                {
+                    try { File.WriteAllText(stamp, DateTime.UtcNow.ToString("O")); }
+                    catch { /* best-effort */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.Debug(ex, "Failed to show Linux first-run prompt");
+            }
+        }
+
+        private bool TryRunLinuxSetupScript(string scriptPath, string? artemisExe)
+        {
+            if (!File.Exists(scriptPath))
+            {
+                _logger?.Warning("Linux setup script not found at {Path}", scriptPath);
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(artemisExe) || !File.Exists(artemisExe))
+            {
+                _logger?.Warning("Could not determine Artemis executable path for setup script (got {Exe})", artemisExe ?? "(null)");
+                return false;
+            }
+
+            try
+            {
+                // chmod +x the script — Content Include doesn't preserve the exec bit
+                using (Process chmod = Process.Start(new ProcessStartInfo("chmod", $"+x \"{scriptPath}\"") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true })!)
+                {
+                    chmod.WaitForExit(5000);
+                }
+
+                var psi = new ProcessStartInfo("/bin/sh")
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                psi.ArgumentList.Add(scriptPath);
+                psi.ArgumentList.Add(artemisExe);
+
+                using Process proc = Process.Start(psi)!;
+                string stdout = proc.StandardOutput.ReadToEnd();
+                string stderr = proc.StandardError.ReadToEnd();
+                proc.WaitForExit(15000);
+
+                if (proc.ExitCode != 0)
+                {
+                    _logger?.Warning("Setup script exited with code {Code}. stdout: {Stdout} stderr: {Stderr}",
+                        proc.ExitCode, stdout, stderr);
+                    return false;
+                }
+
+                _logger?.Information("Setup script completed successfully: {Stdout}", stdout);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(ex, "Failed to run Linux setup script");
+                return false;
+            }
+        }
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern int prctl(int option, nint arg2, nint arg3, nint arg4, nint arg5);
+
+        private const int PR_SET_DUMPABLE = 4;
+        private const int PR_SET_PTRACER = 0x59616d61;
+        private static readonly nint PR_SET_PTRACER_ANY = -1;
+
+        private static void AllowPortalProcessInspection()
+        {
+            if (!OperatingSystem.IsLinux())
+                return;
+
+            ILogger logger = Log.ForContext<AmbilightBootstrapper>();
+
+            // xdg-desktop-portal validates unsandboxed callers by inspecting /proc/<pid>/root.
+            // Hardened systems can deny that unless the process is dumpable and Yama ptrace
+            // restrictions explicitly allow unrelated same-user processes to inspect it.
+            int dumpableResult = prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+            int dumpableErrno = Marshal.GetLastWin32Error();
+            int ptracerResult = prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+            int ptracerErrno = Marshal.GetLastWin32Error();
+
+            if (dumpableResult == 0)
+                logger.Information("prctl(PR_SET_DUMPABLE, 1) succeeded");
+            else
+                logger.Warning("prctl(PR_SET_DUMPABLE, 1) failed errno={Errno}", dumpableErrno);
+
+            if (ptracerResult == 0)
+                logger.Information("prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) succeeded");
+            else
+                logger.Warning("prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) failed errno={Errno}", ptracerErrno);
+
+            try
+            {
+                string ptraceScopePath = "/proc/sys/kernel/yama/ptrace_scope";
+                if (File.Exists(ptraceScopePath))
+                    logger.Information("kernel.yama.ptrace_scope={PtraceScope}", File.ReadAllText(ptraceScopePath).Trim());
+            }
+            catch (Exception ex)
+            {
+                logger.Debug(ex, "Could not read kernel.yama.ptrace_scope");
+            }
+        }
+
     }
 }

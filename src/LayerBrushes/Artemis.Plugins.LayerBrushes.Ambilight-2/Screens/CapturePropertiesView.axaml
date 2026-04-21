@@ -268,6 +268,21 @@
                             ToolTip.Tip="Maximum capture rate (0 = unlimited)" PointerCaptureLost="PointerInputFinished" />
                 </Grid>
 
+                <StackPanel IsVisible="{CompiledBinding ShowLinuxPortalControls}">
+                    <Separator Margin="0 10 0 10" />
+                    <Label Content="Linux screen capture" Margin="-5 0 0 0" />
+                    <Button HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Command="{CompiledBinding ResetLinuxPortalPermission}">
+                        Reset portal permission
+                    </Button>
+                    <TextBlock Margin="0 5 0 0"
+                               TextWrapping="Wrap"
+                               Classes="hint">
+                        Clears the saved KDE/GNOME ScreenCast permission so Artemis asks again on next launch.
+                    </TextBlock>
+                </StackPanel>
+
             </StackPanel>
         </Border>
         </ScrollViewer>

@@ -1,3 +1,4 @@
+#if WINDOWS
 using System;
 using System.Runtime.Versioning;
 using System.Threading;
@@ -137,3 +138,5 @@ internal sealed class WgcCaptureZone : ICaptureZone
         public void Dispose() => Monitor.Exit(lockObj);
     }
 }
+
+#endif

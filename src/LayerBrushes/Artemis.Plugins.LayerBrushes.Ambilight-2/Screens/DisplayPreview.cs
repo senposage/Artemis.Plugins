@@ -6,11 +6,14 @@ using Avalonia.Platform;
 using HPPH;
 using ReactiveUI;
 using ScreenCapture.NET;
+using Serilog;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.Screens;
 
 public sealed class DisplayPreview : ReactiveObject, IDisposable
 {
+    private static readonly ILogger Logger = Log.ForContext<DisplayPreview>();
+
     #region Properties & Fields
 
     private bool _isDisposed;
@@ -43,7 +46,8 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
     {
         Display = display;
 
-        _captureZone = AmbilightBootstrapper.ScreenCaptureService!.GetScreenCapture(display).RegisterCaptureZone(0, 0, display.Width, display.Height, highQuality ? 0 : 2);
+        IScreenCaptureService screenCaptureService = AmbilightBootstrapper.ScreenCaptureService ?? throw new InvalidOperationException("Screen capture service is not ready.");
+        _captureZone = screenCaptureService.GetScreenCapture(display).RegisterCaptureZone(0, 0, display.Width, display.Height, highQuality ? 0 : 2);
         Preview = new WriteableBitmap(new PixelSize(_captureZone.Width, _captureZone.Height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Opaque);
     }
 
@@ -55,12 +59,13 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
         _blackBarDetectionLeft = properties.BlackBarDetectionLeft;
         _blackBarDetectionRight = properties.BlackBarDetectionRight;
 
-        _captureZone = AmbilightBootstrapper.ScreenCaptureService!.GetScreenCapture(display).RegisterCaptureZone(0, 0, display.Width, display.Height);
+        IScreenCaptureService screenCaptureService = AmbilightBootstrapper.ScreenCaptureService ?? throw new InvalidOperationException("Screen capture service is not ready.");
+        _captureZone = screenCaptureService.GetScreenCapture(display).RegisterCaptureZone(0, 0, display.Width, display.Height);
         Preview = new WriteableBitmap(new PixelSize(_captureZone.Width, _captureZone.Height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Opaque);
 
         if (((properties.X + properties.Width) <= display.Width) && ((properties.Y + properties.Height) <= display.Height))
         {
-            _processedCaptureZone = AmbilightBootstrapper.ScreenCaptureService.GetScreenCapture(display)
+            _processedCaptureZone = screenCaptureService.GetScreenCapture(display)
                                                          .RegisterCaptureZone(properties.X, properties.Y, properties.Width, properties.Height, properties.DownscaleLevel);
 
             _blackBarThreshold = properties.BlackBarDetectionThreshold;
@@ -114,8 +119,18 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
 
     public void Dispose()
     {
-        AmbilightBootstrapper.ScreenCaptureService!.GetScreenCapture(Display).UnregisterCaptureZone(_captureZone);
         _isDisposed = true;
+
+        try
+        {
+            AmbilightBootstrapper.ScreenCaptureService?.GetScreenCapture(Display).UnregisterCaptureZone(_captureZone);
+            if (_processedCaptureZone != null)
+                AmbilightBootstrapper.ScreenCaptureService?.GetScreenCapture(Display).UnregisterCaptureZone(_processedCaptureZone);
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Ignoring display preview dispose failure for {Display}", Display.DeviceName);
+        }
     }
 
     #endregion
