@@ -2,11 +2,25 @@ using System;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
 
-internal interface IPortalPipeWireFrameReader : IDisposable
+internal enum PortalPipeWirePixelFormat
+{
+    Bgrx,
+    Bgra,
+    Rgbx,
+    Rgba,
+    Xrgb,
+    Argb,
+    Xbgr,
+    Abgr
+}
+
+internal delegate void PortalPipeWireFrameConsumer(ReadOnlySpan<byte> frame, int sourceWidth, int sourceHeight, int sourceDownscaleLevel, int sourceStride, PortalPipeWirePixelFormat pixelFormat);
+
+internal interface IPortalPipeWireFrameReader : IDisposable, ICaptureBackendStatus
 {
     void Configure(int sourceDownscaleLevel, int fpsLimit);
 
-    bool TryCopyLatestFrame(ref byte[] destination, out int sourceWidth, out int sourceHeight, out int sourceDownscaleLevel);
+    bool TryUseLatestFrame(PortalPipeWireFrameConsumer consumer);
 
     void Restart();
 }

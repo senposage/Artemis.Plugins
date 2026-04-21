@@ -7,16 +7,18 @@ using Serilog;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
 
-internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurableCaptureFps
+internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurableCaptureFps, ICaptureBackendStatus
 {
     private static readonly ILogger Logger = Log.ForContext<PortalPipeWireScreenCapture>();
 
     private readonly PortalPipeWireOutput _output;
-    private readonly IPortalPipeWireFrameReader _frameReader;
+    private readonly int _pipeWireRemoteFd;
     private readonly List<PortalPipeWireCaptureZone> _zones = [];
     private readonly object _zonesLock = new();
-    private byte[] _frameBuffer = [];
+    private IPortalPipeWireFrameReader _frameReader;
+    private PortalPipeWireCaptureZone[] _zoneSnapshot = [];
     private int _fpsLimit = 30;
+    private bool _forceGStreamer;
     private int _captureMissLogCount;
     private int _captureSuccessLogCount;
 
@@ -26,9 +28,32 @@ internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurabl
     public PortalPipeWireScreenCapture(PortalPipeWireOutput output, int pipeWireRemoteFd)
     {
         _output = output;
+        _pipeWireRemoteFd = pipeWireRemoteFd;
         _frameReader = PortalPipeWireFrameReaderFactory.Create(output, pipeWireRemoteFd);
-        _frameBuffer = new byte[Display.Width * Display.Height * 4];
         AmbilightLinuxDiagnostics.Write(Logger, $"created portal PipeWire screen capture for {output.StableId}");
+    }
+
+    public string CaptureBackendName => _frameReader.CaptureBackendName;
+
+    public string CaptureBackendDetails => _frameReader.CaptureBackendDetails;
+
+    public void SetForceGStreamer(bool forceGStreamer)
+    {
+        lock (_zonesLock)
+        {
+            if (_forceGStreamer == forceGStreamer)
+                return;
+
+            _forceGStreamer = forceGStreamer;
+            AmbilightLinuxDiagnostics.Write(Logger,
+                forceGStreamer
+                    ? $"forcing GStreamer PipeWire reader for {_output.StableId}"
+                    : $"allowing direct PipeWire reader for {_output.StableId}");
+
+            _frameReader.Dispose();
+            _frameReader = PortalPipeWireFrameReaderFactory.Create(_output, _pipeWireRemoteFd, forceGStreamer);
+            ReconfigureFrameReader();
+        }
     }
 
     public ICaptureZone RegisterCaptureZone(int x, int y, int width, int height, int downscaleLevel)
@@ -42,6 +67,7 @@ internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurabl
         lock (_zonesLock)
         {
             _zones.Add(zone);
+            _zoneSnapshot = _zones.ToArray();
             ReconfigureFrameReader();
         }
         return zone;
@@ -55,6 +81,7 @@ internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurabl
             if (removed)
             {
                 Logger.Information("Unregistered portal capture zone for {Display}", Display.DeviceName);
+                _zoneSnapshot = _zones.ToArray();
                 ReconfigureFrameReader();
             }
             return removed;
@@ -74,7 +101,19 @@ internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurabl
 
     public bool CaptureScreen()
     {
-        if (!_frameReader.TryCopyLatestFrame(ref _frameBuffer, out int sourceWidth, out int sourceHeight, out int sourceDownscaleLevel))
+        PortalPipeWireCaptureZone[] zones = _zoneSnapshot;
+        bool anyUpdated = false;
+        if (!_frameReader.TryUseLatestFrame((frame, sourceWidth, sourceHeight, sourceDownscaleLevel, sourceStride, pixelFormat) =>
+            {
+                foreach (PortalPipeWireCaptureZone zone in zones)
+                {
+                    if (!zone.NeedsUpdate)
+                        continue;
+
+                    zone.CopyFromFrame(frame, sourceWidth, sourceHeight, sourceDownscaleLevel, sourceStride, pixelFormat);
+                    anyUpdated = true;
+                }
+            }))
         {
             if (_captureMissLogCount < 10)
             {
@@ -90,20 +129,6 @@ internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurabl
             AmbilightLinuxDiagnostics.Write(Logger, $"CaptureScreen received a PipeWire frame for {Display.DeviceName}");
         }
 
-        PortalPipeWireCaptureZone[] zones;
-        lock (_zonesLock)
-            zones = _zones.ToArray();
-
-        bool anyUpdated = false;
-        foreach (PortalPipeWireCaptureZone zone in zones)
-        {
-            if (!zone.NeedsUpdate)
-                continue;
-
-            zone.CopyFromBgra(_frameBuffer, sourceWidth, sourceHeight, sourceDownscaleLevel);
-            anyUpdated = true;
-        }
-
         Updated?.Invoke(this, new ScreenCaptureUpdatedEventArgs(anyUpdated));
         return anyUpdated;
     }
@@ -117,7 +142,11 @@ internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurabl
     {
         lock (_zonesLock)
         {
-            _fpsLimit = fps <= 0 ? 30 : Math.Clamp(fps, 1, PortalPipeWireFrameReader.MaxFpsLimit);
+            fps = fps <= 0 ? 0 : Math.Clamp(fps, 1, PortalPipeWireFrameReader.MaxFpsLimit);
+            if (_fpsLimit == fps)
+                return;
+
+            _fpsLimit = fps;
             ReconfigureFrameReader();
         }
     }
@@ -126,7 +155,10 @@ internal sealed class PortalPipeWireScreenCapture : IScreenCapture, IConfigurabl
     {
         _frameReader.Dispose();
         lock (_zonesLock)
+        {
             _zones.Clear();
+            _zoneSnapshot = [];
+        }
     }
 
     private void ReconfigureFrameReader()

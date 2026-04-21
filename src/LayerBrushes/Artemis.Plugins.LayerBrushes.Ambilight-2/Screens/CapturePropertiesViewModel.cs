@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reactive;
 using System.Reactive.Disposables;
 using System.Reactive.Disposables.Fluent;
+using System.Threading;
 using System.Threading.Tasks;
 using Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups;
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
@@ -24,6 +25,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     private static readonly ILogger Logger = Log.ForContext<CapturePropertiesViewModel>();
     private static readonly TimeSpan ScreenCaptureServiceWaitTimeout = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan ScreenCaptureServicePollInterval = TimeSpan.FromMilliseconds(250);
+    private const int DefaultPreviewFpsLimit = 30;
 
     private readonly ObservableAsPropertyHelper<int> _maxHeight;
     private readonly ObservableAsPropertyHelper<int> _maxWidth;
@@ -32,6 +34,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     private readonly ObservableAsPropertyHelper<bool> _showDownscaleWarning;
     
     private readonly AmbilightCaptureProperties _properties;
+    private readonly SemaphoreSlim _recreateCaptureZoneLock = new(1, 1);
     private readonly DispatcherTimer _updateTimer;
     private readonly IWindowService _windowService;
     private bool _blackBarDetectionBottom;
@@ -67,6 +70,11 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     private int _smoothingFactor;
     private int _frameSkip;
     private int _captureFpsLimit;
+    private bool _forceGStreamerPipeWire;
+    private CancellationTokenSource? _recreateCaptureZoneDelay;
+    private string? _captureRegionDisplayKey;
+    private string _captureBackendName = "Not initialized";
+    private string _captureBackendDetails = "Screen capture has not started yet";
 
     public CapturePropertiesViewModel(AmbilightLayerBrush layerBrush, IWindowService windowService) : base(layerBrush)
     {
@@ -83,13 +91,13 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         _maxWidth = this.WhenAnyValue(vm => vm.X, vm => vm.SelectedCaptureScreen, (x, screen) => (screen?.Display.Width ?? 0) - x).ToProperty(this, vm => vm.MaxWidth);
         _maxHeight = this.WhenAnyValue(vm => vm.Y, vm => vm.SelectedCaptureScreen, (y, screen) => (screen?.Display.Height ?? 0) - y).ToProperty(this, vm => vm.MaxHeight);
         _showDownscaleWarning = this.WhenAnyValue(vm => vm.DownscaleLevel, s => s < 3).ToProperty(this, vm => vm.ShowDownscaleWarning);
-        _updateTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Normal, (_, _) => Update());
+        _updateTimer = new DispatcherTimer(GetPreviewTimerInterval(), DispatcherPriority.Normal, (_, _) => Update());
         _updateTimer.Start();
 
         ViewForMixins.WhenActivated((IActivatableViewModel) this, (CompositeDisposable d) =>
         {
             Initialize(d);
-            this.WhenAnyValue(vm => vm.SelectedCaptureScreen).Subscribe(OnSelectedCaptureScreenChanged);
+            this.WhenAnyValue(vm => vm.SelectedCaptureScreen).Subscribe(OnSelectedCaptureScreenChanged).DisposeWith(d);
         });
     }
     
@@ -123,6 +131,18 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     public ReactiveCommand<Unit, Unit> ResetRegion { get; }
     public ReactiveCommand<Unit, Unit> ResetLinuxPortalPermission { get; }
     public bool ShowLinuxPortalControls => OperatingSystem.IsLinux();
+
+    public string CaptureBackendName
+    {
+        get => _captureBackendName;
+        set => RaiseAndSetIfChanged(ref _captureBackendName, value);
+    }
+
+    public string CaptureBackendDetails
+    {
+        get => _captureBackendDetails;
+        set => RaiseAndSetIfChanged(ref _captureBackendDetails, value);
+    }
 
     public int X
     {
@@ -261,7 +281,17 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
     public int CaptureFpsLimit
     {
         get => _captureFpsLimit;
-        set => RaiseAndSetIfChanged(ref _captureFpsLimit, value);
+        set
+        {
+            RaiseAndSetIfChanged(ref _captureFpsLimit, value);
+            UpdatePreviewTimerInterval();
+        }
+    }
+
+    public bool ForceGStreamerPipeWire
+    {
+        get => _forceGStreamerPipeWire;
+        set => RaiseAndSetIfChanged(ref _forceGStreamerPipeWire, value);
     }
 
     public bool EnableValidation
@@ -270,7 +300,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         set => RaiseAndSetIfChanged(ref _enableValidation, value);
     }
 
-    private static IScreenCaptureService? ScreenCaptureService => AmbilightBootstrapper.ScreenCaptureService;
+    private static AmbilightScreenCaptureService? ScreenCaptureService => AmbilightBootstrapper.ScreenCaptureService;
 
     public void Load()
     {
@@ -300,6 +330,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         SmoothingFactor = (int)(_properties.SmoothingFactor.CurrentValue * 100f);
         FrameSkip = _properties.FrameSkip;
         CaptureFpsLimit = _properties.CaptureFpsLimit;
+        ForceGStreamerPipeWire = _properties.ForceGStreamerPipeWire;
 
         if (_properties.CaptureFullScreen && SelectedCaptureScreen != null)
         {
@@ -338,6 +369,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         _properties.SmoothingFactor.SetCurrentValue(SmoothingFactor / 100f);
         _properties.FrameSkip.SetCurrentValue(FrameSkip);
         _properties.CaptureFpsLimit.SetCurrentValue(CaptureFpsLimit);
+        _properties.ForceGStreamerPipeWire.SetCurrentValue(ForceGStreamerPipeWire);
 
         if (SelectedCaptureScreen != null)
         {
@@ -355,18 +387,42 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
                                                           SelectedCaptureScreen.Display.Width == Width &&
                                                           SelectedCaptureScreen.Display.Height == Height);
 
-            CaptureRegionDisplay = new CaptureRegionDisplayViewModel(SelectedCaptureScreen.Display, _properties);
+            RefreshCaptureRegionDisplay(SelectedCaptureScreen.Display);
         }
 
-        Task.Run(() => AmbilightLayerBrush.RecreateCaptureZone()).ConfigureAwait(false);
+        QueueRecreateCaptureZone();
     }
 
     private async void Initialize(CompositeDisposable d)
     {
+        bool initializationFinished = false;
+        var initializationCancellation = new CancellationTokenSource();
+        CancellationToken initializationToken = initializationCancellation.Token;
+        Disposable.Create(() =>
+        {
+            try
+            {
+                if (!initializationFinished)
+                    initializationCancellation.Cancel();
+            }
+            catch
+            {
+            }
+
+            CancelQueuedRecreateCaptureZone();
+            DisposePreviewCaptureZones();
+            CaptureScreens.Clear();
+            _updateTimer.Stop();
+        }).DisposeWith(d);
+
         try
         {
-            if (!await CreateCaptureScreens())
+            if (!await CreateCaptureScreens(initializationToken))
                 return;
+        }
+        catch (OperationCanceledException) when (initializationCancellation.IsCancellationRequested)
+        {
+            return;
         }
         catch (Exception ex)
         {
@@ -379,21 +435,23 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
             RequestClose();
             return;
         }
+        finally
+        {
+            initializationFinished = true;
+            initializationCancellation.Dispose();
+        }
+
+        if (initializationToken.IsCancellationRequested || d.IsDisposed)
+            return;
 
         Load();
         _saveOnChange = true;
         EnableValidation = true;
-
-        Disposable.Create(() =>
-        {
-            CaptureScreens.Clear();
-            _updateTimer.Stop();
-        }).DisposeWith(d);
     }
 
-    private async Task<bool> CreateCaptureScreens()
+    private async Task<bool> CreateCaptureScreens(CancellationToken cancellationToken)
     {
-        IScreenCaptureService? screenCaptureService = await WaitForScreenCaptureService();
+        IScreenCaptureService? screenCaptureService = await WaitForScreenCaptureService(cancellationToken);
         if (screenCaptureService == null)
         {
             await _windowService.CreateContentDialog()
@@ -406,6 +464,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
             return false;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         CaptureScreens.AddRange(screenCaptureService.GetGraphicsCards()
             .SelectMany(gg => screenCaptureService.GetDisplays(gg))
             .Select(d => new CaptureScreenViewModel(d))
@@ -453,9 +512,23 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
             captureScreenViewModel.Update();
         CaptureRegionEditor?.Update();
         CaptureRegionDisplay?.Update();
+        UpdateCaptureBackendStatus();
     }
 
-    private static async Task<IScreenCaptureService?> WaitForScreenCaptureService()
+    private void UpdatePreviewTimerInterval()
+    {
+        _updateTimer.Interval = GetPreviewTimerInterval();
+    }
+
+    private TimeSpan GetPreviewTimerInterval()
+    {
+        int fpsLimit = CaptureFpsLimit <= 0
+            ? DefaultPreviewFpsLimit
+            : Math.Clamp(CaptureFpsLimit, 1, PortalPipeWireFrameReader.MaxFpsLimit);
+        return TimeSpan.FromMilliseconds(Math.Max(1, 1000.0 / fpsLimit));
+    }
+
+    private static async Task<IScreenCaptureService?> WaitForScreenCaptureService(CancellationToken cancellationToken)
     {
         IScreenCaptureService? screenCaptureService = ScreenCaptureService;
         if (screenCaptureService != null)
@@ -467,7 +540,7 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         DateTimeOffset deadline = DateTimeOffset.UtcNow + ScreenCaptureServiceWaitTimeout;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            await Task.Delay(ScreenCaptureServicePollInterval);
+            await Task.Delay(ScreenCaptureServicePollInterval, cancellationToken);
             screenCaptureService = ScreenCaptureService;
             if (screenCaptureService != null)
                 return screenCaptureService;
@@ -512,11 +585,129 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
             ExecuteResetRegion();
         // Recreate the region editor for the screen
         if (CaptureRegionEditor?.Display != SelectedCaptureScreen.Display)
-            CaptureRegionEditor = new CaptureRegionEditorViewModel(this, SelectedCaptureScreen.Display);
-        if (CaptureRegionDisplay?.Display != SelectedCaptureScreen.Display)
-            CaptureRegionDisplay = new CaptureRegionDisplayViewModel(SelectedCaptureScreen.Display, _properties);
+            ReplaceCaptureRegionEditor(new CaptureRegionEditorViewModel(this, SelectedCaptureScreen.Display));
+        RefreshCaptureRegionDisplay(SelectedCaptureScreen.Display);
         
         if (_saveOnChange)
             Save();
+    }
+
+    private void ReplaceCaptureRegionEditor(CaptureRegionEditorViewModel? editor)
+    {
+        CaptureRegionEditorViewModel? old = CaptureRegionEditor;
+        CaptureRegionEditor = editor;
+        if (!ReferenceEquals(old, editor))
+            old?.Dispose();
+    }
+
+    private void ReplaceCaptureRegionDisplay(CaptureRegionDisplayViewModel? display)
+    {
+        CaptureRegionDisplayViewModel? old = CaptureRegionDisplay;
+        CaptureRegionDisplay = display;
+        if (display == null)
+            _captureRegionDisplayKey = null;
+        if (!ReferenceEquals(old, display))
+            old?.Dispose();
+    }
+
+    private void RefreshCaptureRegionDisplay(Display display)
+    {
+        string displayKey = BuildCaptureRegionDisplayKey(display);
+        if (CaptureRegionDisplay?.Display == display && _captureRegionDisplayKey == displayKey)
+            return;
+
+        _captureRegionDisplayKey = displayKey;
+        ReplaceCaptureRegionDisplay(new CaptureRegionDisplayViewModel(display, _properties));
+    }
+
+    private string BuildCaptureRegionDisplayKey(Display display)
+    {
+        return string.Join('|',
+            display.DeviceName,
+            display.Index,
+            display.GraphicsCard.VendorId,
+            display.GraphicsCard.DeviceId,
+            X,
+            Y,
+            Width,
+            Height,
+            DownscaleLevel,
+            BlackBarDetectionTop,
+            BlackBarDetectionBottom,
+            BlackBarDetectionLeft,
+            BlackBarDetectionRight,
+            BlackBarDetectionThreshold);
+    }
+
+    private void DisposePreviewCaptureZones()
+    {
+        foreach (CaptureScreenViewModel captureScreen in CaptureScreens)
+            captureScreen.Dispose();
+
+        ReplaceCaptureRegionEditor(null);
+        ReplaceCaptureRegionDisplay(null);
+    }
+
+    private void QueueRecreateCaptureZone()
+    {
+        CancelQueuedRecreateCaptureZone();
+        var delay = new CancellationTokenSource();
+        _recreateCaptureZoneDelay = delay;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(150), delay.Token).ConfigureAwait(false);
+                await _recreateCaptureZoneLock.WaitAsync(delay.Token).ConfigureAwait(false);
+                try
+                {
+                    AmbilightLayerBrush.RecreateCaptureZone();
+                }
+                finally
+                {
+                    _recreateCaptureZoneLock.Release();
+                }
+            }
+            catch (OperationCanceledException) when (delay.IsCancellationRequested)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning(ex, "Failed to recreate Ambilight capture zone after settings change");
+            }
+            finally
+            {
+                if (ReferenceEquals(_recreateCaptureZoneDelay, delay))
+                    _recreateCaptureZoneDelay = null;
+                delay.Dispose();
+            }
+        });
+    }
+
+    private void CancelQueuedRecreateCaptureZone()
+    {
+        try { _recreateCaptureZoneDelay?.Cancel(); }
+        catch { }
+        _recreateCaptureZoneDelay = null;
+    }
+
+    private void UpdateCaptureBackendStatus()
+    {
+        AmbilightScreenCaptureService? screenCaptureService = ScreenCaptureService;
+        if (screenCaptureService == null)
+        {
+            CaptureBackendName = "Not initialized";
+            CaptureBackendDetails = OperatingSystem.IsLinux()
+                ? "Linux capture service is still starting, blocked on portal permission, or unavailable"
+                : "Screen capture service is unavailable";
+            return;
+        }
+
+        CaptureBackendName = screenCaptureService.CaptureBackendName;
+        CaptureBackendDetails = screenCaptureService.GetCaptureBackendDetails(SelectedCaptureScreen?.Display);
     }
 }

@@ -1,4 +1,6 @@
-﻿using ReactiveUI;
+using System.Reactive.Disposables;
+using System.Reactive.Disposables.Fluent;
+using ReactiveUI;
 using ReactiveUI.Avalonia;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.Screens;
@@ -9,10 +11,13 @@ public partial class CaptureScreenView : ReactiveUserControl<CaptureScreenViewMo
     {
         InitializeComponent();
 
-        this.WhenActivated(_ =>
+        this.WhenActivated(d =>
         {
-            if (ViewModel != null)
-                ViewModel.PreviewImage = DisplayPreviewImage;
+            if (ViewModel == null)
+                return;
+
+            ViewModel.PreviewImage = DisplayPreviewImage;
+            Disposable.Create(() => ViewModel.PreviewImage = null).DisposeWith(d);
         });
     }
 }

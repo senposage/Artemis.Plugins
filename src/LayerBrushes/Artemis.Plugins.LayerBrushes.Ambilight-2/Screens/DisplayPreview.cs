@@ -119,6 +119,9 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
 
     public void Dispose()
     {
+        if (_isDisposed)
+            return;
+
         _isDisposed = true;
 
         try

@@ -1,4 +1,5 @@
 using System;
+using System.Reactive.Disposables;
 using System.Reactive.Disposables.Fluent;
 using Avalonia;
 using Avalonia.Controls;
@@ -19,11 +20,17 @@ public partial class CaptureRegionEditorView : ReactiveUserControl<CaptureRegion
     public CaptureRegionEditorView()
     {
         InitializeComponent();
-        DisplayPreviewImage.LayoutUpdated += DisplayPreviewImageOnLayoutUpdated;
         this.WhenActivated(d =>
         {
+            DisplayPreviewImage.LayoutUpdated += DisplayPreviewImageOnLayoutUpdated;
+            Disposable.Create(() => DisplayPreviewImage.LayoutUpdated -= DisplayPreviewImageOnLayoutUpdated).DisposeWith(d);
+
+            if (ViewModel == null)
+                return;
+
             ViewModel.WhenAnyValue(vm => vm.CaptureRegion).Subscribe(UpdateDisplay).DisposeWith(d);
-            ViewModel!.PreviewImage = DisplayPreviewImage;
+            ViewModel.PreviewImage = DisplayPreviewImage;
+            Disposable.Create(() => ViewModel.PreviewImage = null).DisposeWith(d);
         });
     }
 

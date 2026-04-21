@@ -11,7 +11,7 @@ using Tmds.DBus;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
 
-internal sealed class PortalPipeWireScreenCaptureService : IScreenCaptureService
+internal sealed class PortalPipeWireScreenCaptureService : IScreenCaptureService, ICaptureBackendStatus
 {
     private static readonly ILogger Logger = Log.ForContext<PortalPipeWireScreenCaptureService>();
 
@@ -43,6 +43,10 @@ internal sealed class PortalPipeWireScreenCaptureService : IScreenCaptureService
         AmbilightLinuxDiagnostics.Write(Logger, $"portal PipeWire capture service initialized with {_outputs.Count} display(s)");
         Logger.Information("Portal PipeWire capture service initialized with {Count} display(s)", _outputs.Count);
     }
+
+    public string CaptureBackendName => "XDG Desktop Portal / PipeWire";
+
+    public string CaptureBackendDetails => "Portal ScreenCast active; Direct PipeWire preferred with GStreamer fallback";
 
     public static bool IsSupported(out string? reason)
     {

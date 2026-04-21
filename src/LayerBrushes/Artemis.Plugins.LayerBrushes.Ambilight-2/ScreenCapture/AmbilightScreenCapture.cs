@@ -117,6 +117,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         public bool HasCaptureError => _captureError;
         public bool ShouldOutputBlack => _suspended || _displayOff;
         public bool IsSuspended => _suspended;
+        public string CaptureBackendDetails => _screenCapture is ICaptureBackendStatus status
+            ? status.CaptureBackendDetails
+            : _screenCapture.GetType().Name;
 
         #endregion
 
@@ -204,7 +207,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         public void SetFpsLimit(int fps)
         {
-            _fpsLimit = Math.Max(0, fps);
+            fps = Math.Max(0, fps);
+            if (_fpsLimit == fps)
+                return;
+
+            _fpsLimit = fps;
             lock (_captureLock)
             {
                 if (_screenCapture is IConfigurableCaptureFps configurableCapture)
@@ -213,6 +220,18 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 if (_screenCapture is Wgc.WgcScreenCapture wgc)
                     wgc.SetFpsLimit(_fpsLimit);
 #endif
+            }
+        }
+
+        public void SetForceGStreamerPipeWire(bool forceGStreamer)
+        {
+            if (!OperatingSystem.IsLinux())
+                return;
+
+            lock (_captureLock)
+            {
+                if (_screenCapture is PortalPipeWire.PortalPipeWireScreenCapture portalCapture)
+                    portalCapture.SetForceGStreamer(forceGStreamer);
             }
         }
 

@@ -1,7 +1,6 @@
 using System;
 using System.Reactive.Disposables;
 using System.Reactive.Disposables.Fluent;
-using System.Threading.Tasks;
 using Artemis.UI.Shared;
 using Avalonia;
 using Avalonia.Controls;
@@ -11,7 +10,7 @@ using SkiaSharp;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.Screens;
 
-public class CaptureRegionEditorViewModel : ActivatableViewModelBase
+public class CaptureRegionEditorViewModel : ActivatableViewModelBase, IDisposable
 {
     private Rect _captureRegion;
     private Image? _previewImage;
@@ -68,7 +67,7 @@ public class CaptureRegionEditorViewModel : ActivatableViewModelBase
     public void ApplyRegion()
     {
         CapturePropertiesViewModel.EnableValidation = true;
-        Task.Run(CapturePropertiesViewModel.Save);
+        CapturePropertiesViewModel.Save();
     }
 
     private void CaptureRegionUpdated()
@@ -79,5 +78,10 @@ public class CaptureRegionEditorViewModel : ActivatableViewModelBase
             CapturePropertiesViewModel.Width,
             CapturePropertiesViewModel.Height
         );
+    }
+
+    public void Dispose()
+    {
+        DisplayPreview.Dispose();
     }
 }

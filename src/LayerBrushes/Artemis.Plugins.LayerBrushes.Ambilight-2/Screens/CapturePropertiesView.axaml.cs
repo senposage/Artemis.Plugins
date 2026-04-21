@@ -15,7 +15,11 @@ public partial class CapturePropertiesView : ReactiveUserControl<CaptureProperti
     public CapturePropertiesView()
     {
         InitializeComponent();
-        this.WhenActivated(d => ViewModel.WhenAnyValue(vm => vm.EnableValidation).Subscribe(EnableValidation).DisposeWith(d));
+        this.WhenActivated(d =>
+        {
+            if (ViewModel != null)
+                ViewModel.WhenAnyValue(vm => vm.EnableValidation).Subscribe(EnableValidation).DisposeWith(d);
+        });
     }
 
     private void EnableValidation(bool enable)

@@ -470,12 +470,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 int x = Math.Min(_display.Value.Width - width, props.X);
                 int y = Math.Min(_display.Value.Height - height, props.Y);
                 IScreenCapture screenCapture = _screenCaptureService.GetScreenCapture(_display.Value);
+                if (screenCapture is AmbilightScreenCapture ambilightCapture)
+                {
+                    ambilightCapture.SetForceGStreamerPipeWire(props.ForceGStreamerPipeWire);
+                    ambilightCapture.SetFpsLimit(props.CaptureFpsLimit);
+                }
+
                 _captureZone = screenCapture.RegisterCaptureZone(x, y, width, height, props.DownscaleLevel);
                 _captureZone.AutoUpdate = false;
-
-                // Apply FPS limit to the capture loop
-                if (screenCapture is AmbilightScreenCapture ambilightCapture)
-                    ambilightCapture.SetFpsLimit(props.CaptureFpsLimit);
 
             }
             finally

@@ -37,6 +37,38 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         public IEnumerable<Display> GetDisplays(GraphicsCard graphicsCard) => _displays.TryGetValue(graphicsCard, out List<Display>? displays) ? displays : Enumerable.Empty<Display>();
 
+        public string CaptureBackendName => _screenCaptureService is ICaptureBackendStatus status
+            ? status.CaptureBackendName
+            : DescribeBackendName(_screenCaptureService.GetType().Name);
+
+        public string CaptureBackendDetails => _screenCaptureService is ICaptureBackendStatus status
+            ? status.CaptureBackendDetails
+            : $"{CaptureBackendName} active";
+
+        public string GetCaptureBackendDetails(Display? display)
+        {
+            if (display == null)
+                return CaptureBackendDetails;
+
+            lock (_screenCaptures)
+            {
+                if (_screenCaptures.TryGetValue(display.Value, out IScreenCapture? screenCapture) &&
+                    screenCapture is AmbilightScreenCapture ambilightCapture)
+                    return ambilightCapture.CaptureBackendDetails;
+            }
+
+            return CaptureBackendDetails;
+        }
+
+        private static string DescribeBackendName(string typeName)
+        {
+            if (typeName.Contains("DX11", System.StringComparison.OrdinalIgnoreCase))
+                return "DX11 Desktop Duplication";
+            if (typeName.Contains("X11", System.StringComparison.OrdinalIgnoreCase))
+                return "X11";
+            return typeName;
+        }
+
         public IScreenCapture GetScreenCapture(Display display)
         {
             lock (_screenCaptures)

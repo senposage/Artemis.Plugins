@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.Versioning;
+using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
 using ScreenCapture.NET;
 using Serilog;
 using Vortice.Direct3D11;
@@ -15,7 +16,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wgc;
 /// and reuses DX11ScreenCaptureService for display/GPU enumeration (which is lightweight).
 /// </summary>
 [SupportedOSPlatform("windows10.0.19041.0")]
-internal sealed class WgcScreenCaptureService : IScreenCaptureService
+internal sealed class WgcScreenCaptureService : IScreenCaptureService, ICaptureBackendStatus
 {
     private static readonly ILogger Logger = Log.ForContext<WgcScreenCaptureService>();
 
@@ -68,6 +69,8 @@ internal sealed class WgcScreenCaptureService : IScreenCaptureService
 
     public IEnumerable<GraphicsCard> GetGraphicsCards() => _enumerationService.GetGraphicsCards();
     public IEnumerable<Display> GetDisplays(GraphicsCard graphicsCard) => _enumerationService.GetDisplays(graphicsCard);
+    public string CaptureBackendName => "Windows Graphics Capture";
+    public string CaptureBackendDetails => "WGC active; persistent capture session with GPU mip downscale";
 
     public IScreenCapture GetScreenCapture(Display display)
     {

@@ -56,6 +56,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups
         // Performance
         public IntLayerProperty FrameSkip { get; set; }
         public IntLayerProperty CaptureFpsLimit { get; set; }
+        public BoolLayerProperty ForceGStreamerPipeWire { get; set; }
 
 
         protected override void PopulateDefaults()
@@ -72,6 +73,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups
             SmoothingFactor.DefaultValue = 0f;
             FrameSkip.DefaultValue = 0;
             CaptureFpsLimit.DefaultValue = 30;
+            ForceGStreamerPipeWire.DefaultValue = false;
         }
 
         protected override void EnableProperties()

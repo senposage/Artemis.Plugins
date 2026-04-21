@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
 using ScreenCapture.NET;
 using Serilog;
 using Vortice.Direct3D11;
@@ -25,7 +26,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wgc;
 /// capture work entirely between our desired intervals.
 /// </summary>
 [SupportedOSPlatform("windows10.0.19041.0")]
-internal sealed class WgcScreenCapture : IScreenCapture
+internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
 {
     #region Interop
 
@@ -87,6 +88,8 @@ internal sealed class WgcScreenCapture : IScreenCapture
 
     public Display Display { get; }
     public event EventHandler<ScreenCaptureUpdatedEventArgs>? Updated;
+    public string CaptureBackendName => "Windows Graphics Capture";
+    public string CaptureBackendDetails => $"WGC active; display={Display.DeviceName}, fps={_fpsLimit}";
 
     public WgcScreenCapture(Display display, ID3D11Device device, IDirect3DDevice winrtDevice)
     {
@@ -208,7 +211,11 @@ internal sealed class WgcScreenCapture : IScreenCapture
     /// </summary>
     internal void SetFpsLimit(int fps)
     {
-        _fpsLimit = Math.Max(0, fps);
+        fps = Math.Max(0, fps);
+        if (_fpsLimit == fps)
+            return;
+
+        _fpsLimit = fps;
         lock (_sessionLock)
             ApplyMinUpdateInterval();
     }

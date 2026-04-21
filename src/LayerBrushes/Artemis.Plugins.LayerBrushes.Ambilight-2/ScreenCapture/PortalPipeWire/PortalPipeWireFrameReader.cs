@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Artemis.Plugins.LayerBrushes.Ambilight;
+using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wlroots;
 using Serilog;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
@@ -12,6 +13,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
 internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
 {
     private static readonly ILogger Logger = Log.ForContext<PortalPipeWireFrameReader>();
+    private static readonly Lazy<bool> GStreamerGlAvailability = new(CheckGStreamerGlAvailability);
 
     internal const int MaxFpsLimit = 144;
 
@@ -27,6 +29,8 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
     private string? _pipeline;
     private Process? _process;
     private Task? _readerTask;
+    private Task? _stderrTask;
+    private Task? _noFrameWarningTask;
     private CancellationTokenSource? _cancellationTokenSource;
     private byte[] _latestFrame = [];
     private volatile bool _hasFrame;
@@ -40,6 +44,8 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
     private int _missingFrameLogCount;
     private int _receivedFrameLogCount;
     private int _processExitedLogCount;
+    private string _activePipelineName = "not started";
+    private bool _activePipelineUsesGl;
 
     public PortalPipeWireFrameReader(PortalPipeWireOutput output, int pipeWireRemoteFd)
     {
@@ -48,10 +54,14 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
         Configure(0, _fpsLimit);
     }
 
+    public string CaptureBackendName => _activePipelineUsesGl ? "GStreamer GL PipeWire" : "GStreamer PipeWire";
+
+    public string CaptureBackendDetails => $"GStreamer PipeWire active; pipeline={_activePipelineName}, node={_output.NodeId}, size={_frameWidth}x{_frameHeight}, fps={FormatFpsLimit(_fpsLimit)}";
+
     public void Configure(int sourceDownscaleLevel, int fpsLimit)
     {
         sourceDownscaleLevel = Math.Clamp(sourceDownscaleLevel, 0, 8);
-        fpsLimit = fpsLimit <= 0 ? 30 : Math.Clamp(fpsLimit, 1, MaxFpsLimit);
+        fpsLimit = fpsLimit <= 0 ? 0 : Math.Clamp(fpsLimit, 1, MaxFpsLimit);
 
         lock (_configurationLock)
         {
@@ -88,7 +98,7 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
         }
     }
 
-    public bool TryCopyLatestFrame(ref byte[] destination, out int sourceWidth, out int sourceHeight, out int sourceDownscaleLevel)
+    public bool TryUseLatestFrame(PortalPipeWireFrameConsumer consumer)
     {
         EnsureStarted();
         if (_process is { HasExited: true } && _processExitedLogCount < 5)
@@ -104,22 +114,12 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
                 _missingFrameLogCount++;
                 Logger.Information("No PipeWire frame available yet for {Display} (node={NodeId})", _output.StableId, _output.NodeId);
             }
-            sourceWidth = 0;
-            sourceHeight = 0;
-            sourceDownscaleLevel = 0;
             return false;
         }
 
         lock (_frameLock)
-        {
-            if (destination.Length != _latestFrame.Length)
-                destination = new byte[_latestFrame.Length];
+            consumer(_latestFrame, _frameWidth, _frameHeight, _sourceDownscaleLevel, _frameWidth * 4, PortalPipeWirePixelFormat.Bgra);
 
-            _latestFrame.AsSpan().CopyTo(destination);
-            sourceWidth = _frameWidth;
-            sourceHeight = _frameHeight;
-            sourceDownscaleLevel = _sourceDownscaleLevel;
-        }
         return true;
     }
 
@@ -162,7 +162,7 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
         AmbilightLinuxDiagnostics.Write(Logger, $"started GStreamer PipeWire reader pid={_process.Id} for {_output.StableId}");
         Logger.Information("Started GStreamer PipeWire reader pid={Pid} for {Display}", _process.Id, _output.StableId);
         _readerTask = Task.Run(() => ReadFrames(_process, _cancellationTokenSource.Token));
-        _ = Task.Run(() => WarnIfNoFramesArrive(_process, _cancellationTokenSource.Token));
+        _noFrameWarningTask = Task.Run(() => WarnIfNoFramesArrive(_process, _cancellationTokenSource.Token));
     }
 
     private void RestartProcessIfRunning()
@@ -192,8 +192,10 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
             fpsLimit = _fpsLimit;
         }
 
-        string pipeline = BuildPipeline(frameWidth, frameHeight, fpsLimit);
-        _pipeline = pipeline;
+        PipelinePlan pipelinePlan = BuildPipeline(frameWidth, frameHeight, fpsLimit);
+        _pipeline = pipelinePlan.Command;
+        _activePipelineName = pipelinePlan.Name;
+        _activePipelineUsesGl = pipelinePlan.UsesGl;
 
         var startInfo = new ProcessStartInfo("bash")
         {
@@ -202,12 +204,12 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
             UseShellExecute = false
         };
         startInfo.ArgumentList.Add("-lc");
-        startInfo.ArgumentList.Add(pipeline);
+        startInfo.ArgumentList.Add(pipelinePlan.Command);
 
-        Logger.Information("Starting GStreamer PipeWire pipeline for {Display}: node={NodeId} size={Width}x{Height} downscale={Downscale} fps={Fps} fd={Fd}",
-            _output.StableId, _output.NodeId, frameWidth, frameHeight, sourceDownscaleLevel, fpsLimit, _pipeWireRemoteFd);
+        Logger.Information("Starting GStreamer PipeWire pipeline for {Display}: pipeline={PipelineName} node={NodeId} size={Width}x{Height} downscale={Downscale} fps={Fps} fd={Fd}",
+            _output.StableId, pipelinePlan.Name, _output.NodeId, frameWidth, frameHeight, sourceDownscaleLevel, fpsLimit, _pipeWireRemoteFd);
         AmbilightLinuxDiagnostics.Write(Logger,
-            $"starting GStreamer pipeline display={_output.StableId} node={_output.NodeId} size={frameWidth}x{frameHeight} downscale={sourceDownscaleLevel} fps={fpsLimit} frameBytes={frameSize} fd={_pipeWireRemoteFd}");
+            $"starting GStreamer pipeline display={_output.StableId} pipeline={pipelinePlan.Name} node={_output.NodeId} size={frameWidth}x{frameHeight} downscale={sourceDownscaleLevel} fps={fpsLimit} frameBytes={frameSize} fd={_pipeWireRemoteFd}");
 
         int originalFdFlags = PreparePipeWireFdForChildProcess();
         Process process;
@@ -220,36 +222,58 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
             RestorePipeWireFdFlags(originalFdFlags);
         }
 
-        _ = Task.Run(() => ReadGStreamerStdErr(process));
+        _stderrTask = Task.Run(() => ReadGStreamerStdErr(process));
         return process;
     }
 
-    private string BuildPipeline(int frameWidth, int frameHeight, int fpsLimit)
+    private PipelinePlan BuildPipeline(int frameWidth, int frameHeight, int fpsLimit)
     {
         string source = $"pipewiresrc fd={_pipeWireRemoteFd} path={_output.NodeId} do-timestamp=true";
         bool needsScale = frameWidth != _output.Display.Width || frameHeight != _output.Display.Height;
+        bool tryGlScale = needsScale && IsGStreamerGlAvailable();
 
-        // videorate with max-rate limits fps by dropping frames without strict caps negotiation
-        string rateLimit = $"videorate drop-only=true max-rate={fpsLimit} !";
+        // videorate with max-rate limits fps by dropping frames without strict caps negotiation.
+        // A limit of 0 means unlimited and intentionally omits videorate.
+        string rateLimit = fpsLimit > 0 ? $"videorate drop-only=true max-rate={fpsLimit} !" : "";
+
+        if (tryGlScale && _pipelineAttempt == 0)
+        {
+            return new PipelinePlan(
+                "GStreamer GL scale",
+                "exec gst-launch-1.0 -q " +
+                $"{source} ! {rateLimit} " +
+                "glupload ! glcolorconvert ! glcolorscale ! " +
+                $"'video/x-raw(memory:GLMemory),width={frameWidth},height={frameHeight}' ! " +
+                "gldownload ! videoconvert ! " +
+                $"video/x-raw,format=BGRA,width={frameWidth},height={frameHeight} ! " +
+                "fdsink fd=1 sync=false",
+                usesGl: true);
+        }
 
         if (needsScale)
         {
+            int cpuAttempt = tryGlScale ? _pipelineAttempt - 1 : _pipelineAttempt;
+
             // pipewiresrc always outputs native resolution — videoscale handles downscaling.
             // Use progressive fallback: direct BGRx/BGRA first (no convert), then with videoconvert.
-            return _pipelineAttempt switch
+            return cpuAttempt switch
             {
                 0 =>
+                    new PipelinePlan(
+                    "GStreamer CPU scale",
                     "exec gst-launch-1.0 -q " +
                     $"{source} ! {rateLimit} " +
                     "videoscale ! " +
                     $"video/x-raw,format=BGRx,width={frameWidth},height={frameHeight} ! " +
-                    "fdsink fd=1 sync=false",
+                    "fdsink fd=1 sync=false"),
                 _ =>
+                    new PipelinePlan(
+                    "GStreamer CPU convert+scale",
                     "exec gst-launch-1.0 -q " +
                     $"{source} ! {rateLimit} " +
                     "videoscale ! videoconvert ! " +
                     $"video/x-raw,format=BGRA,width={frameWidth},height={frameHeight} ! " +
-                    "fdsink fd=1 sync=false"
+                    "fdsink fd=1 sync=false")
             };
         }
 
@@ -257,25 +281,41 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
         return _pipelineAttempt switch
         {
             0 =>
+                new PipelinePlan(
+                "GStreamer native direct format",
                 // Best case: pipewiresrc already gives BGRx/BGRA, no conversion needed
                 "exec gst-launch-1.0 -q " +
                 $"{source} ! {rateLimit} " +
                 $"'video/x-raw,format=(string){{BGRx,BGRA}}' ! " +
-                "fdsink fd=1 sync=false",
+                "fdsink fd=1 sync=false"),
             1 =>
+                new PipelinePlan(
+                "GStreamer native convert",
                 // Add videoconvert for compositors that give a different format
                 "exec gst-launch-1.0 -q " +
                 $"{source} ! {rateLimit} " +
                 "videoconvert ! video/x-raw,format=BGRA ! " +
-                "fdsink fd=1 sync=false",
+                "fdsink fd=1 sync=false"),
             _ =>
+                new PipelinePlan(
+                "GStreamer native unconstrained",
                 // Full fallback: no format constraints at all
                 "exec gst-launch-1.0 -q " +
                 $"{source} ! {rateLimit} " +
                 "videoconvert ! " +
-                "fdsink fd=1 sync=false"
+                "fdsink fd=1 sync=false")
         };
     }
+
+    private static bool IsGStreamerGlAvailable()
+    {
+        if (Environment.GetEnvironmentVariable("ARTEMIS_GSTREAMER_GL") == "0")
+            return false;
+
+        return GStreamerGlAvailability.Value;
+    }
+
+    private static string FormatFpsLimit(int fpsLimit) => fpsLimit <= 0 ? "unlimited" : fpsLimit.ToString();
 
     private int PreparePipeWireFdForChildProcess()
     {
@@ -365,9 +405,26 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
                 _pipeline ?? "(unknown)");
             AmbilightLinuxDiagnostics.Write(Logger,
                 $"no PipeWire frames after 5 seconds for {_output.StableId}; processExited={process.HasExited} exitCode={(process.HasExited ? process.ExitCode.ToString() : "(running)")} pipeline={_pipeline ?? "(unknown)"}");
+
+            if (_activePipelineUsesGl)
+                FallBackFromGlPipeline(process);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+        }
+    }
+
+    private void FallBackFromGlPipeline(Process process)
+    {
+        lock (_processLock)
+        {
+            if (!ReferenceEquals(_process, process) || _hasFrame || !_activePipelineUsesGl)
+                return;
+
+            _pipelineAttempt++;
+            AmbilightLinuxDiagnostics.Write(Logger, $"GStreamer GL produced no frames for {_output.StableId}; falling back to CPU GStreamer pipeline");
+            Logger.Warning("GStreamer GL produced no frames for {Display}; falling back to CPU GStreamer pipeline", _output.StableId);
+            StopNoLock();
         }
     }
 
@@ -435,22 +492,57 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
         try { _cancellationTokenSource?.Cancel(); }
         catch { }
 
+        Process? process = _process;
+        int? pid = null;
+        string pipelineName = _activePipelineName;
         try
         {
-            if (_process is { HasExited: false })
+            if (process is { HasExited: false })
             {
-                _process.Kill(entireProcessTree: true);
-                _process.WaitForExit(1500);
+                pid = process.Id;
+                AmbilightLinuxDiagnostics.Write(Logger, $"stopping GStreamer pipeline pid={pid.Value} pipeline={pipelineName} for {_output.StableId}");
+                process.Kill(entireProcessTree: true);
+                if (!process.WaitForExit(1500))
+                {
+                    AmbilightLinuxDiagnostics.Write(Logger, $"GStreamer pipeline pid={pid.Value} did not exit within 1500ms for {_output.StableId}");
+                    Logger.Warning("GStreamer PipeWire reader pid={Pid} did not exit within timeout for {Display}", pid.Value, _output.StableId);
+                }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            AmbilightLinuxDiagnostics.Write(Logger, $"failed stopping GStreamer pipeline pid={(pid?.ToString() ?? "unknown")} for {_output.StableId}: {ex.GetBaseException().Message}");
+            Logger.Debug(ex, "Failed stopping GStreamer PipeWire reader for {Display}", _output.StableId);
+        }
 
-        _process?.Dispose();
+        WaitForHelperTask(_readerTask, "stdout reader");
+        WaitForHelperTask(_stderrTask, "stderr reader");
+        WaitForHelperTask(_noFrameWarningTask, "no-frame watcher");
+
+        process?.Dispose();
         _process = null;
         _readerTask = null;
+        _stderrTask = null;
+        _noFrameWarningTask = null;
         _cancellationTokenSource?.Dispose();
         _cancellationTokenSource = null;
         _hasFrame = false;
+    }
+
+    private void WaitForHelperTask(Task? task, string taskName)
+    {
+        if (task == null || task.IsCompleted || task.Id == Task.CurrentId)
+            return;
+
+        try
+        {
+            if (!task.Wait(TimeSpan.FromMilliseconds(500)))
+                AmbilightLinuxDiagnostics.Write(Logger, $"GStreamer {taskName} did not finish promptly for {_output.StableId}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug(ex, "Ignoring GStreamer {TaskName} shutdown failure for {Display}", taskName, _output.StableId);
+        }
     }
 
     [DllImport("libc", SetLastError = true)]
@@ -458,4 +550,31 @@ internal sealed class PortalPipeWireFrameReader : IPortalPipeWireFrameReader
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fcntl(int fd, int cmd, int arg);
+
+    private static bool CheckGStreamerGlAvailability()
+    {
+        bool glUpload = WlrootsProcess.CanRun("gst-inspect-1.0", "glupload");
+        bool glColorConvert = WlrootsProcess.CanRun("gst-inspect-1.0", "glcolorconvert");
+        bool glColorScale = WlrootsProcess.CanRun("gst-inspect-1.0", "glcolorscale");
+        bool glDownload = WlrootsProcess.CanRun("gst-inspect-1.0", "gldownload");
+        bool available = glUpload && glColorConvert && glColorScale && glDownload;
+
+        AmbilightLinuxDiagnostics.Write(Logger,
+            $"GStreamer GL dependency check: glupload={glUpload} glcolorconvert={glColorConvert} glcolorscale={glColorScale} gldownload={glDownload}");
+        return available;
+    }
+
+    private readonly struct PipelinePlan
+    {
+        public PipelinePlan(string name, string command, bool usesGl = false)
+        {
+            Name = name;
+            Command = command;
+            UsesGl = usesGl;
+        }
+
+        public string Name { get; }
+        public string Command { get; }
+        public bool UsesGl { get; }
+    }
 }

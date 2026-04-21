@@ -85,7 +85,7 @@ internal sealed class PortalPipeWireCaptureZone : ICaptureZone
 
     internal bool NeedsUpdate => AutoUpdate || _updateRequested;
 
-    internal unsafe void CopyFromBgra(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight, int sourceDownscaleLevel)
+    internal unsafe void CopyFromFrame(ReadOnlySpan<byte> source, int sourceWidth, int sourceHeight, int sourceDownscaleLevel, int sourceStride, PortalPipeWirePixelFormat pixelFormat)
     {
         if (!NeedsUpdate)
             return;
@@ -107,11 +107,9 @@ internal sealed class PortalPipeWireCaptureZone : ICaptureZone
                     for (int dx = 0; dx < Width; dx++)
                     {
                         int sx = Math.Min(sourceX + (dx * step), sourceWidth - 1);
-                        int sourceIndex = ((sy * sourceWidth) + sx) * 4;
+                        int sourceIndex = (sy * sourceStride) + sx * 4;
                         byte* pixel = dstRow + dx * 4;
-                        pixel[0] = source[sourceIndex];
-                        pixel[1] = source[sourceIndex + 1];
-                        pixel[2] = source[sourceIndex + 2];
+                        WriteBgraPixel(source, sourceIndex, pixel, pixelFormat);
                         pixel[3] = 255;
                     }
                 }
@@ -119,6 +117,37 @@ internal sealed class PortalPipeWireCaptureZone : ICaptureZone
         }
 
         Updated?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static unsafe void WriteBgraPixel(ReadOnlySpan<byte> source, int sourceIndex, byte* destination, PortalPipeWirePixelFormat pixelFormat)
+    {
+        switch (pixelFormat)
+        {
+            case PortalPipeWirePixelFormat.Bgrx:
+            case PortalPipeWirePixelFormat.Bgra:
+                destination[0] = source[sourceIndex];
+                destination[1] = source[sourceIndex + 1];
+                destination[2] = source[sourceIndex + 2];
+                break;
+            case PortalPipeWirePixelFormat.Rgbx:
+            case PortalPipeWirePixelFormat.Rgba:
+                destination[0] = source[sourceIndex + 2];
+                destination[1] = source[sourceIndex + 1];
+                destination[2] = source[sourceIndex];
+                break;
+            case PortalPipeWirePixelFormat.Xrgb:
+            case PortalPipeWirePixelFormat.Argb:
+                destination[0] = source[sourceIndex + 3];
+                destination[1] = source[sourceIndex + 2];
+                destination[2] = source[sourceIndex + 1];
+                break;
+            case PortalPipeWirePixelFormat.Xbgr:
+            case PortalPipeWirePixelFormat.Abgr:
+                destination[0] = source[sourceIndex + 1];
+                destination[1] = source[sourceIndex + 2];
+                destination[2] = source[sourceIndex + 3];
+                break;
+        }
     }
 
     private void RecalculateSize()

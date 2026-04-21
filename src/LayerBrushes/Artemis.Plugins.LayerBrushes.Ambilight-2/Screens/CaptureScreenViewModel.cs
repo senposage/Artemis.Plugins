@@ -9,7 +9,7 @@ using ScreenCapture.NET;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.Screens;
 
-public class CaptureScreenViewModel : ActivatableViewModelBase
+public class CaptureScreenViewModel : ActivatableViewModelBase, IDisposable
 {
     private bool _isSelected;
     private Image? _previewImage;
@@ -48,5 +48,10 @@ public class CaptureScreenViewModel : ActivatableViewModelBase
     {
         DisplayPreview.Update();
         PreviewImage?.InvalidateVisual();
+    }
+
+    public void Dispose()
+    {
+        DisplayPreview.Dispose();
     }
 }

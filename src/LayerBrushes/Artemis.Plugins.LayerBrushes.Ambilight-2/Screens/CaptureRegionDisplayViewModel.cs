@@ -1,3 +1,4 @@
+using System;
 using System.Reactive.Disposables;
 using System.Reactive.Disposables.Fluent;
 using Artemis.Plugins.LayerBrushes.Ambilight.PropertyGroups;
@@ -8,7 +9,7 @@ using ScreenCapture.NET;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.Screens;
 
-public class CaptureRegionDisplayViewModel : ActivatableViewModelBase
+public class CaptureRegionDisplayViewModel : ActivatableViewModelBase, IDisposable
 {
     private Image? _previewImage;
 
@@ -34,5 +35,10 @@ public class CaptureRegionDisplayViewModel : ActivatableViewModelBase
     {
         DisplayPreview?.Update();
         PreviewImage?.InvalidateVisual();
+    }
+
+    public void Dispose()
+    {
+        DisplayPreview.Dispose();
     }
 }

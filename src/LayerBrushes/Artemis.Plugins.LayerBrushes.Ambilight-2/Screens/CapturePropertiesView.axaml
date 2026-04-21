@@ -249,10 +249,22 @@
                 <!-- Performance -->
                 <Label Content="Performance" Margin="-5 0 0 0" />
 
+                <Label Content="Capture backend" Margin="-5 5 0 0" />
+                <Border Classes="card" Padding="10" Margin="0 0 0 5">
+                    <StackPanel>
+                        <TextBlock Text="{CompiledBinding CaptureBackendName}" FontWeight="SemiBold" />
+                        <TextBlock Text="{CompiledBinding CaptureBackendDetails}"
+                                   Margin="0 3 0 0"
+                                   TextWrapping="Wrap"
+                                   Classes="hint" />
+                    </StackPanel>
+                </Border>
+
                 <Label Content="Frame skip" Margin="-5 5 0 0" />
                 <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
                     <controls:NumberBox Grid.Column="0" Grid.Row="0" Value="{CompiledBinding FrameSkip}" Margin="0 0 5 0" VerticalAlignment="Center"
-                                        Minimum="0" Maximum="30" />
+                                        Minimum="0" Maximum="30"
+                                        LostFocus="InputFinished" />
                     <Slider Grid.Column="1" Grid.Row="0" Minimum="0" Maximum="30" TickFrequency="1" TickPlacement="BottomRight"
                             Value="{CompiledBinding FrameSkip}"
                             ToolTip.Tip="Skip N frames between captures (0 = capture every frame)" PointerCaptureLost="PointerInputFinished" />
@@ -261,8 +273,9 @@
                 <Label Content="Capture FPS limit" Margin="-5 5 0 0" />
                 <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
                     <controls:NumberBox Grid.Column="0" Grid.Row="0" Value="{CompiledBinding CaptureFpsLimit}" Margin="0 0 5 0" VerticalAlignment="Center"
-                                        Minimum="0" Maximum="144"
-                                        attachedProperties:NumberBoxAssist.SuffixText="fps" />
+                                         Minimum="0" Maximum="144"
+                                         attachedProperties:NumberBoxAssist.SuffixText="fps"
+                                         LostFocus="InputFinished" />
                     <Slider Grid.Column="1" Grid.Row="0" Minimum="0" Maximum="144" TickFrequency="15" TickPlacement="BottomRight"
                             Value="{CompiledBinding CaptureFpsLimit}"
                             ToolTip.Tip="Maximum capture rate (0 = unlimited)" PointerCaptureLost="PointerInputFinished" />
@@ -271,6 +284,14 @@
                 <StackPanel IsVisible="{CompiledBinding ShowLinuxPortalControls}">
                     <Separator Margin="0 10 0 10" />
                     <Label Content="Linux screen capture" Margin="-5 0 0 0" />
+                    <CheckBox Content="Force GStreamer PipeWire"
+                              IsChecked="{CompiledBinding ForceGStreamerPipeWire}"
+                              PointerCaptureLost="PointerInputFinished" />
+                    <TextBlock Margin="0 3 0 8"
+                               TextWrapping="Wrap"
+                               Classes="hint">
+                        Uses the GStreamer reader instead of direct PipeWire. Try this on Linux for potentially better performance.
+                    </TextBlock>
                     <Button HorizontalAlignment="Stretch"
                             HorizontalContentAlignment="Center"
                             Command="{CompiledBinding ResetLinuxPortalPermission}">

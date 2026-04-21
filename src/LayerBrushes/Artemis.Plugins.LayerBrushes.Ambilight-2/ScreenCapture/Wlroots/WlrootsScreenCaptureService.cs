@@ -8,7 +8,7 @@ using Serilog;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wlroots;
 
-internal sealed class WlrootsScreenCaptureService : IScreenCaptureService
+internal sealed class WlrootsScreenCaptureService : IScreenCaptureService, ICaptureBackendStatus
 {
     private static readonly ILogger Logger = Log.ForContext<WlrootsScreenCaptureService>();
 
@@ -67,6 +67,10 @@ internal sealed class WlrootsScreenCaptureService : IScreenCaptureService
     {
         yield return _graphicsCard;
     }
+
+    public string CaptureBackendName => "wlroots";
+
+    public string CaptureBackendDetails => "wlroots/grim screenshot backend active";
 
     public IEnumerable<Display> GetDisplays(GraphicsCard graphicsCard)
     {

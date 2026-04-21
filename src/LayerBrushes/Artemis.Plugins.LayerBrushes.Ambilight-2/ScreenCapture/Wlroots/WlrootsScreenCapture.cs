@@ -5,7 +5,7 @@ using ScreenCapture.NET;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wlroots;
 
-internal sealed class WlrootsScreenCapture : IScreenCapture
+internal sealed class WlrootsScreenCapture : IScreenCapture, ICaptureBackendStatus
 {
     private readonly WlrootsOutput _output;
     private readonly List<WlrootsCaptureZone> _zones = [];
@@ -13,6 +13,8 @@ internal sealed class WlrootsScreenCapture : IScreenCapture
 
     public Display Display => _output.Display;
     public event EventHandler<ScreenCaptureUpdatedEventArgs>? Updated;
+    public string CaptureBackendName => "wlroots";
+    public string CaptureBackendDetails => $"wlroots/grim active; output={Display.DeviceName}";
 
     public WlrootsScreenCapture(WlrootsOutput output)
     {

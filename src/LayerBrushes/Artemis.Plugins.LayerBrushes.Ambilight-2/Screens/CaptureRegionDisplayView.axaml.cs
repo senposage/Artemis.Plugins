@@ -1,3 +1,5 @@
+using System.Reactive.Disposables;
+using System.Reactive.Disposables.Fluent;
 using Avalonia.Controls;
 using ReactiveUI;
 using ReactiveUI.Avalonia;
@@ -12,6 +14,13 @@ public partial class CaptureRegionDisplayView : ReactiveUserControl<CaptureRegio
     {
         InitializeComponent();
         _displayPreviewImage = this.Get<Image>("DisplayPreviewImage");
-        this.WhenActivated(d => { ViewModel!.PreviewImage = _displayPreviewImage; });
+        this.WhenActivated(d =>
+        {
+            if (ViewModel == null)
+                return;
+
+            ViewModel.PreviewImage = _displayPreviewImage;
+            Disposable.Create(() => ViewModel.PreviewImage = null).DisposeWith(d);
+        });
     }
 }

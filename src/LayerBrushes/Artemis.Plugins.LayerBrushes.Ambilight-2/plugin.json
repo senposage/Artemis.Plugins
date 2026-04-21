@@ -4,7 +4,7 @@
   "Name": "Ambilight v2",
   "Icon": "MonitorMultiple",
   "Description": "Screen-Capturing to use the image currently shown on the display for a brush.",
-  "Version": "2.1.0.0",
+  "Version": "2.3.4.5",
   "Main": "Artemis.Plugins.LayerBrushes.AmbilightV2.dll",
   "Platforms": "Windows,Linux"
 }
