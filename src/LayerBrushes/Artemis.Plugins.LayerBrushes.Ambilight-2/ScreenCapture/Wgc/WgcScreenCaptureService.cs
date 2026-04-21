@@ -32,6 +32,16 @@ internal sealed class WgcScreenCaptureService : IScreenCaptureService, ICaptureB
         _device = Direct3DHelper.CreateD3D11Device();
         _winrtDevice = Direct3DHelper.CreateDirect3DDevice(_device);
 
+        // Register the host process with Windows's "let apps hide the capture border"
+        // consent so IsBorderRequired=false actually suppresses the yellow indicator.
+        // Without this call Artemis does not appear in Settings → Privacy → Graphics
+        // Capture and Windows draws the border regardless of IsBorderRequired. Missing
+        // on older Windows builds (pre-24H2); failure here is non-fatal.
+        if (Direct3DHelper.TryRequestBorderlessAccess(out string? borderlessError))
+            Logger.Debug("Requested WGC borderless capture access");
+        else
+            Logger.Debug("WGC borderless access request unavailable: {Reason}", borderlessError);
+
         // Self-test: verify WGC can actually create a capture item for the first monitor.
         // If this fails the exception propagates to the bootstrapper, which falls back to DX11.
         foreach (GraphicsCard gc in _enumerationService.GetGraphicsCards())
@@ -57,12 +67,23 @@ internal sealed class WgcScreenCaptureService : IScreenCaptureService, ICaptureB
     /// </summary>
     public static bool IsSupported()
     {
+        return IsSupported(out _);
+    }
+
+    public static bool IsSupported(out string? unsupportedReason)
+    {
         try
         {
-            return GraphicsCaptureSession.IsSupported();
+            bool supported = GraphicsCaptureSession.IsSupported();
+            unsupportedReason = supported
+                ? null
+                : "GraphicsCaptureSession.IsSupported() returned false";
+            return supported;
         }
-        catch
+        catch (Exception ex)
         {
+            unsupportedReason = ex.GetBaseException().Message;
+            Logger.Warning(ex, "Windows Graphics Capture support check threw");
             return false;
         }
     }

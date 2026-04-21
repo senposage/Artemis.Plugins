@@ -37,6 +37,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         #region Properties & Fields
 
         internal static AmbilightScreenCaptureService? ScreenCaptureService { get; private set; }
+        internal static Exception? ScreenCaptureInitializationFailure { get; private set; }
         private static readonly object ScreenCaptureServiceLock = new();
 
         #endregion
@@ -49,6 +50,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             _managementService = plugin.Resolve<IPluginManagementService>();
             _renderService = plugin.Resolve<IRenderService>();
             _brushProvider = plugin.GetFeatureInfo<AmbilightLayerBrushProvider>();
+            ScreenCaptureInitializationFailure = null;
 
             if (OperatingSystem.IsLinux())
             {
@@ -60,6 +62,12 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
             else
             {
+            if (OperatingSystem.IsWindows())
+            {
+                AmbilightWindowsDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(),
+                    $"plugin enabled; fallback diagnostics at {AmbilightWindowsDiagnostics.LogPath}");
+            }
+
             try
             {
                 IScreenCaptureService screenCaptureService = CreateScreenCaptureService();
@@ -67,6 +75,12 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
             catch (Exception ex)
             {
+                ScreenCaptureInitializationFailure = ex;
+                if (OperatingSystem.IsWindows())
+                {
+                    AmbilightWindowsDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(),
+                        $"screen capture service unavailable: {ex.GetBaseException().Message}");
+                }
                 _logger?.Error(ex, "Screen capture service unavailable — plugin will load but capture is disabled");
             }
             }
@@ -133,6 +147,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
             catch (Exception ex)
             {
+                ScreenCaptureInitializationFailure = ex;
                 _logger?.Error(ex, "Screen capture service unavailable - plugin will load but capture is disabled");
             }
         }
@@ -152,6 +167,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
             catch (Exception ex)
             {
+                ScreenCaptureInitializationFailure = ex;
                 _logger?.Error(ex, "Linux screen capture service initialization failed before capture service creation");
             }
         }
@@ -164,6 +180,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                     return false;
 
                 ScreenCaptureService = screenCaptureService;
+                ScreenCaptureInitializationFailure = null;
                 return true;
             }
         }
@@ -173,20 +190,43 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             if (OperatingSystem.IsWindows())
             {
 #if WINDOWS
+                ILogger logger = Log.ForContext<AmbilightBootstrapper>();
+
                 try
                 {
-                    if (WgcScreenCaptureService.IsSupported())
+                    bool wgcSupported = WgcScreenCaptureService.IsSupported(out string? wgcUnsupportedReason);
+                    logger.Information("Windows Graphics Capture support check returned {Supported}. Reason: {Reason}",
+                        wgcSupported,
+                        wgcUnsupportedReason ?? "(none)");
+                    AmbilightWindowsDiagnostics.Write(logger,
+                        $"WGC support check returned {wgcSupported}. Reason: {wgcUnsupportedReason ?? "(none)"}");
+
+                    if (wgcSupported)
                     {
-                        Log.ForContext<AmbilightBootstrapper>().Information("Using Windows Graphics Capture backend");
+                        logger.Information("Using Windows Graphics Capture backend");
+                        AmbilightWindowsDiagnostics.Write(logger, "using Windows Graphics Capture backend");
                         return new WgcScreenCaptureService();
                     }
+
+                    logger.Warning("Windows Graphics Capture is not supported on this system, falling back to DX11 Desktop Duplication. Reason: {Reason}",
+                        wgcUnsupportedReason ?? "unknown");
+                    AmbilightWindowsDiagnostics.Write(logger,
+                        $"WGC unsupported; falling back to DX11 Desktop Duplication. Reason: {wgcUnsupportedReason ?? "unknown"}");
                 }
                 catch (Exception ex)
                 {
-                    Log.ForContext<AmbilightBootstrapper>().Warning(ex, "WGC initialization failed, falling back to DX11");
+                    logger.Warning(ex, "Windows Graphics Capture initialization failed, falling back to DX11 Desktop Duplication");
+                    AmbilightWindowsDiagnostics.Write(logger,
+                        $"WGC initialization failed; falling back to DX11 Desktop Duplication: {ex.GetBaseException().Message}");
                 }
+#else
+                Log.ForContext<AmbilightBootstrapper>().Warning(
+                    "Windows Graphics Capture was not compiled into this Ambilight v2 build, falling back to DX11 Desktop Duplication");
+                AmbilightWindowsDiagnostics.Write(Log.ForContext<AmbilightBootstrapper>(),
+                    "WGC was not compiled into this build; falling back to DX11 Desktop Duplication");
 #endif
                 Log.ForContext<AmbilightBootstrapper>().Information("Using DX11 Desktop Duplication backend");
+                AmbilightWindowsDiagnostics.Write(Log.ForContext<AmbilightBootstrapper>(), "using DX11 Desktop Duplication backend");
                 return new DX11ScreenCaptureService();
             }
 

@@ -3,6 +3,8 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Threading;
+using Artemis.Plugins.LayerBrushes.Ambilight;
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
 using ScreenCapture.NET;
 using Serilog;
@@ -41,9 +43,18 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         int CreateForMonitor(IntPtr monitor, ref Guid iid, out IntPtr result);
     }
 
-    [DllImport("combase.dll", PreserveSig = false)]
-    private static extern void RoGetActivationFactory(
-        [MarshalAs(UnmanagedType.HString)] string activatableClassId,
+    [DllImport("combase.dll", ExactSpelling = true)]
+    private static extern int WindowsCreateString(
+        [MarshalAs(UnmanagedType.LPWStr)] string sourceString,
+        int length,
+        out IntPtr hstring);
+
+    [DllImport("combase.dll", ExactSpelling = true)]
+    private static extern int WindowsDeleteString(IntPtr hstring);
+
+    [DllImport("combase.dll", ExactSpelling = true)]
+    private static extern int RoGetActivationFactory(
+        IntPtr activatableClassId,
         ref Guid iid,
         out IntPtr factory);
 
@@ -56,7 +67,10 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     private readonly ID3D11Device _device;
     private readonly IDirect3DDevice _winrtDevice;
     private readonly List<WgcCaptureZone> _zones = [];
+    private readonly HashSet<string> _unsupportedSessionProperties = [];
+    private readonly HashSet<string> _loggedSessionPropertyApplications = [];
     private readonly object _sessionLock = new();
+    private readonly object _frameLock = new();
 
     // Persistent — expensive to create, reused across capture cycles
     private GraphicsCaptureItem? _captureItem;
@@ -71,6 +85,11 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     // that one it stops doing capture copies until we consume, drastically reducing
     // DWM GPU work between our capture intervals.
     private Direct3D11CaptureFrame? _heldFrame;
+    private Direct3D11CaptureFrame? _pendingFrame;
+    private long _framesArrived;
+    private long _framesConsumed;
+    private bool _captureAttemptLogged;
+    private DateTimeOffset _nextNoFrameLog = DateTimeOffset.MinValue;
 
     private volatile bool _disposed;
     private volatile int _fpsLimit;
@@ -103,7 +122,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     private static GraphicsCaptureItem CreateCaptureItemForMonitor(IntPtr hMonitor)
     {
         Guid interopIid = typeof(IGraphicsCaptureItemInterop).GUID;
-        RoGetActivationFactory("Windows.Graphics.Capture.GraphicsCaptureItem", ref interopIid, out IntPtr factoryPtr);
+        IntPtr factoryPtr = GetActivationFactory("Windows.Graphics.Capture.GraphicsCaptureItem", ref interopIid);
         try
         {
             var interop = (IGraphicsCaptureItemInterop)Marshal.GetObjectForIUnknown(factoryPtr);
@@ -124,6 +143,22 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         finally
         {
             Marshal.Release(factoryPtr);
+        }
+    }
+
+    private static IntPtr GetActivationFactory(string activatableClassId, ref Guid iid)
+    {
+        int hr = WindowsCreateString(activatableClassId, activatableClassId.Length, out IntPtr hstring);
+        Marshal.ThrowExceptionForHR(hr);
+        try
+        {
+            hr = RoGetActivationFactory(hstring, ref iid, out IntPtr factoryPtr);
+            Marshal.ThrowExceptionForHR(hr);
+            return factoryPtr;
+        }
+        finally
+        {
+            WindowsDeleteString(hstring);
         }
     }
 
@@ -191,17 +226,49 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
                 DirectXPixelFormat.B8G8R8A8UIntNormalized,
                 2, // double-buffer: 1 held + 1 pre-delivered = 0 free → DWM stops capture copies between grabs
                 _captureItem!.Size);
+            _framePool.FrameArrived += OnFrameArrived;
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"WGC frame pool created for {Display.DeviceName} size={_captureItem.Size.Width}x{_captureItem.Size.Height}");
 
             _session = _framePool.CreateCaptureSession(_captureItem);
-            _session.IsCursorCaptureEnabled = false;
-            _session.IsBorderRequired = false;
+            // Raw-COM QI on the underlying WinRT object — CsWinRT projection setters
+            // throw MissingMethodException here because Artemis's assembly-resolution
+            // loads an SDK.NET whose metadata lacks these setters.
+            ApplyRawComSessionSetting(nameof(GraphicsCaptureSession.IsCursorCaptureEnabled),
+                Direct3DHelper.TrySetIsCursorCaptureEnabled, value: false);
+            ApplyRawComSessionSetting(nameof(GraphicsCaptureSession.IsBorderRequired),
+                Direct3DHelper.TrySetIsBorderRequired, value: false);
 
             // MinUpdateInterval (24H2+) tells DWM to skip capture work between intervals.
             // This is the key to reducing DWM GPU usage during high-FPS games.
             ApplyMinUpdateInterval();
 
+            AmbilightWindowsDiagnostics.Write(Logger, $"WGC StartCapture calling for {Display.DeviceName}");
             _session.StartCapture();
             Logger.Debug("WGC session started for {Display}", Display.DeviceName);
+            AmbilightWindowsDiagnostics.Write(Logger, $"WGC session started for {Display.DeviceName} size={_captureItem.Size.Width}x{_captureItem.Size.Height}");
+        }
+    }
+
+    private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)
+    {
+        try
+        {
+            Direct3D11CaptureFrame? frame = sender.TryGetNextFrame();
+            if (frame == null)
+                return;
+
+            lock (_frameLock)
+            {
+                _pendingFrame?.Dispose();
+                _pendingFrame = frame;
+                Interlocked.Increment(ref _framesArrived);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Warning(ex, "WGC FrameArrived handling failed for {Display}", Display.DeviceName);
+            AmbilightWindowsDiagnostics.Write(Logger, $"WGC FrameArrived handling failed for {Display.DeviceName}: {ex.GetBaseException().Message}");
         }
     }
 
@@ -224,9 +291,61 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     {
         if (_session == null) return;
         int fps = _fpsLimit;
-        _session.MinUpdateInterval = fps > 0
-            ? TimeSpan.FromSeconds(1.0 / fps)
-            : TimeSpan.Zero;
+        TimeSpan interval = fps > 0 ? TimeSpan.FromSeconds(1.0 / fps) : TimeSpan.Zero;
+        ApplyRawComSessionSetting(nameof(GraphicsCaptureSession.MinUpdateInterval),
+            Direct3DHelper.TrySetMinUpdateInterval, interval);
+    }
+
+    private delegate bool RawComSessionSetter(GraphicsCaptureSession session, bool value, out string? error);
+    private delegate bool RawComTimeSpanSessionSetter(GraphicsCaptureSession session, TimeSpan value, out string? error);
+
+    private void ApplyRawComSessionSetting(string propertyName, RawComSessionSetter setter, bool value)
+    {
+        if (_session == null || _unsupportedSessionProperties.Contains(propertyName))
+            return;
+
+        if (setter(_session, value, out string? error))
+            MarkSessionPropertyApplied(propertyName, value ? "true" : "false");
+        else
+            MarkSessionPropertyUnsupported(propertyName, error ?? "unknown error");
+    }
+
+    private void ApplyRawComSessionSetting(string propertyName, RawComTimeSpanSessionSetter setter, TimeSpan value)
+    {
+        if (_session == null || _unsupportedSessionProperties.Contains(propertyName))
+            return;
+
+        if (setter(_session, value, out string? error))
+            MarkSessionPropertyApplied(propertyName, $"{value.TotalMilliseconds:0.###}ms ({value.Ticks} ticks)");
+        else
+            MarkSessionPropertyUnsupported(propertyName, error ?? "unknown error");
+    }
+
+    private void MarkSessionPropertyApplied(string propertyName, string value)
+    {
+        string key = $"{propertyName}={value}";
+        if (!_loggedSessionPropertyApplications.Add(key))
+            return;
+
+        Logger.Debug("WGC optional session property {Property} applied for {Display}: {Value}",
+            propertyName,
+            Display.DeviceName,
+            value);
+        AmbilightWindowsDiagnostics.Write(Logger,
+            $"WGC optional session property {propertyName} applied for {Display.DeviceName}: {value}");
+    }
+
+    private void MarkSessionPropertyUnsupported(string propertyName, string reason)
+    {
+        if (!_unsupportedSessionProperties.Add(propertyName))
+            return;
+
+        Logger.Debug("WGC optional session property {Property} is unavailable for {Display}: {Reason}",
+            propertyName,
+            Display.DeviceName,
+            reason);
+        AmbilightWindowsDiagnostics.Write(Logger,
+            $"WGC optional session property {propertyName} unavailable for {Display.DeviceName}: {reason}");
     }
 
     /// <summary>
@@ -237,6 +356,13 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     {
         lock (_sessionLock)
         {
+            lock (_frameLock)
+            {
+                _pendingFrame?.Dispose();
+                _pendingFrame = null;
+            }
+            _heldFrame?.Dispose();
+            _heldFrame = null;
             _session?.Dispose();
             _session = null;
             _framePool?.Dispose();
@@ -247,6 +373,11 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     private void StopSessionUnlocked()
     {
         // Called from within _sessionLock — direct disposal without re-locking
+        lock (_frameLock)
+        {
+            _pendingFrame?.Dispose();
+            _pendingFrame = null;
+        }
         _heldFrame?.Dispose();
         _heldFrame = null;
         _session?.Dispose();
@@ -340,6 +471,16 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         if (minDownscale == int.MaxValue)
             return false; // no zone needs data
 
+        if (!_captureAttemptLogged)
+        {
+            _captureAttemptLogged = true;
+            int zoneCount;
+            lock (_zones)
+                zoneCount = _zones.Count;
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"WGC first capture call for {Display.DeviceName}; minDownscale={minDownscale}; zones={zoneCount}");
+        }
+
         // Session stays alive between frames — avoids costly DWM setup/teardown.
         EnsureCaptureItem();
         StartSession();
@@ -347,9 +488,36 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         // Pool size 2 + frame holding: one buffer is occupied by _heldFrame, the
         // other was pre-filled by DWM during our sleep.  Grab the pre-filled frame,
         // then release the old one — DWM refills that buffer and stops (0 free).
-        Direct3D11CaptureFrame? frame = _framePool?.TryGetNextFrame();
+        Direct3D11CaptureFrame? frame;
+        lock (_frameLock)
+        {
+            frame = _pendingFrame;
+            _pendingFrame = null;
+        }
+
+        // Keep polling as a fallback, but prefer frames delivered by FrameArrived.
+        frame ??= _framePool?.TryGetNextFrame();
         if (frame == null)
+        {
+#if DEBUG
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            if (now >= _nextNoFrameLog)
+            {
+                long arrived = Interlocked.Read(ref _framesArrived);
+                long consumed = Interlocked.Read(ref _framesConsumed);
+                Logger.Debug("WGC has no frame yet for {Display}; arrived={Arrived} consumed={Consumed}",
+                    Display.DeviceName,
+                    arrived,
+                    consumed);
+                AmbilightWindowsDiagnostics.Write(Logger,
+                    $"WGC has no frame yet for {Display.DeviceName}; arrived={arrived} consumed={consumed}");
+                _nextNoFrameLog = now + TimeSpan.FromSeconds(5);
+            }
+#endif
             return false;
+        }
+
+        Interlocked.Increment(ref _framesConsumed);
 
         // Release previously held frame AFTER grabbing the new one.
         // This is the key ordering: grab → release → DWM fills 1 → stops.
@@ -431,6 +599,8 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         var zone = new WgcCaptureZone(Display, x, y, width, height, downscaleLevel);
         lock (_zones)
             _zones.Add(zone);
+        AmbilightWindowsDiagnostics.Write(Logger,
+            $"registered WGC capture zone for {Display.DeviceName}: {x},{y} {width}x{height} downscale={downscaleLevel}");
         return zone;
     }
 

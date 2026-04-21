@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using Serilog;
 
@@ -20,15 +21,17 @@ internal static class AmbilightLinuxDiagnostics
         }
     }
 
+    [Conditional("DEBUG")]
     public static void Write(ILogger logger, string message)
     {
         if (!OperatingSystem.IsLinux())
             return;
 
-        logger.Warning("[Ambilight/Linux] {Message}", message);
+        logger.Debug("[Ambilight/Linux] {Message}", message);
         Write(message);
     }
 
+    [Conditional("DEBUG")]
     public static void Write(string message)
     {
         if (!OperatingSystem.IsLinux())

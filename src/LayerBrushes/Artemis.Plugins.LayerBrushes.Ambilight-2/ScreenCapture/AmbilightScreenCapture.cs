@@ -66,7 +66,13 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         internal static void PersistDisplayOffState()
         {
             foreach (AmbilightScreenCapture capture in s_instances.Values)
-                s_displayOff[capture.Display.DeviceName] = capture._suspended || capture._displayOff;
+            {
+                bool persistOff = capture._displayOff || (capture._suspended && capture._ddcEverWorked);
+                s_displayOff[capture.Display.DeviceName] = persistOff;
+                if (OperatingSystem.IsWindows())
+                    AmbilightWindowsDiagnostics.Write(Logger,
+                        $"persist display-off state for {capture.Display.DeviceName}: {persistOff} (suspended={capture._suspended} displayOff={capture._displayOff} ddcEverWorked={capture._ddcEverWorked})");
+            }
         }
 
         /// <summary>
@@ -108,6 +114,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         private DateTimeOffset _captureBackoffUntil = DateTimeOffset.MinValue;
         private bool _restartAfterBackoff;
         private int _captureBackoffSeconds = 2;
+        private bool _captureLoopEntered;
+        private DateTimeOffset _nextBlackSkipLog = DateTimeOffset.MinValue;
+        private DateTimeOffset _nextCaptureFalseLog = DateTimeOffset.MinValue;
 
         private Task? _updateTask;
         private CancellationTokenSource? _cancellationTokenSource;
@@ -160,6 +169,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 {
                     CheckDisplayPowerState();
                 }
+
+                AmbilightWindowsDiagnostics.Write(Logger,
+                    $"created capture wrapper for {Display.DeviceName}; backend={CaptureBackendDetails}; initial displayOff={_displayOff}; ddcEverWorked={_ddcEverWorked}");
             }
         }
 
@@ -261,7 +273,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                     if (_displayOff) { _displayOff = false; s_displayOff[Display.DeviceName] = false; }
                     if (_suspended) _suspended = false;
                     if (wasOff || wasSuspended)
+                    {
                         Logger.Debug("Display available: {Display} (wasOff={Off} wasSuspended={Susp})", Display.DeviceName, wasOff, wasSuspended);
+                        AmbilightWindowsDiagnostics.Write(Logger,
+                            $"display available: {Display.DeviceName} (wasOff={wasOff} wasSuspended={wasSuspended})");
+                    }
                     break;
 
                 case MonitorPowerState.PowerState.Off:
@@ -272,6 +288,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                         _displayOff = true;
                         s_displayOff[Display.DeviceName] = true;
                         Logger.Debug("Display DPMS off: {Display}", Display.DeviceName);
+                        AmbilightWindowsDiagnostics.Write(Logger, $"display DPMS off: {Display.DeviceName}");
                     }
                     break;
 
@@ -281,6 +298,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                         _displayOff = true;
                         s_displayOff[Display.DeviceName] = true;
                         Logger.Debug("Display not present: {Display}", Display.DeviceName);
+                        AmbilightWindowsDiagnostics.Write(Logger, $"display not present: {Display.DeviceName}");
                     }
                     break;
 
@@ -291,6 +309,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                         _displayOff = true;
                         s_displayOff[Display.DeviceName] = true;
                         Logger.Debug("DDC silent (prev. worked): {Display} treated as off", Display.DeviceName);
+                        AmbilightWindowsDiagnostics.Write(Logger, $"DDC silent after previously working: {Display.DeviceName} treated as off");
+                    }
+                    else if (_displayOff && !_ddcEverWorked)
+                    {
+                        _displayOff = false;
+                        s_displayOff[Display.DeviceName] = false;
+                        AmbilightWindowsDiagnostics.Write(Logger,
+                            $"DDC unavailable and no previous DDC success for {Display.DeviceName}; clearing inherited display-off state");
                     }
                     break;
             }
@@ -300,11 +326,34 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         #region Capture loop
 
+        private void UpdateLoopSafe()
+        {
+            try
+            {
+                UpdateLoop();
+            }
+            catch (OperationCanceledException)
+            {
+                if (OperatingSystem.IsWindows())
+                    AmbilightWindowsDiagnostics.Write(Logger, $"capture update loop stopped for {Display.DeviceName}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "Capture update loop crashed for {Display}", Display.DeviceName);
+                if (OperatingSystem.IsWindows())
+                    AmbilightWindowsDiagnostics.Write(Logger,
+                        $"capture update loop crashed for {Display.DeviceName}: {ex.GetBaseException().Message}");
+            }
+        }
+
         private void UpdateLoop()
         {
             int consecutiveErrors = 0;
             var stopwatch = Stopwatch.StartNew();
             bool prevShouldOutputBlack = ShouldOutputBlack;
+            if (OperatingSystem.IsWindows())
+                AmbilightWindowsDiagnostics.Write(Logger,
+                    $"capture update loop started for {Display.DeviceName}; backend={CaptureBackendDetails}; suspended={_suspended}; displayOff={_displayOff}; fps={_fpsLimit}");
 
             while (true)
             {
@@ -320,12 +369,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 if (_suspended)
                 {
+                    LogBlackSkipIfNeeded("suspended");
                     Thread.Sleep(50);
                     continue;
                 }
 
                 if (_displayOff)
                 {
+                    LogBlackSkipIfNeeded("displayOff");
                     Thread.Sleep(200);
                     continue;
                 }
@@ -374,9 +425,18 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 try
                 {
+                    if (!_captureLoopEntered && OperatingSystem.IsWindows())
+                    {
+                        _captureLoopEntered = true;
+                        AmbilightWindowsDiagnostics.Write(Logger,
+                            $"first capture attempt for {Display.DeviceName}; backend={CaptureBackendDetails}; zones={_zoneCount}; fps={_fpsLimit}");
+                    }
+
                     bool success;
                     lock (_captureLock)
                         success = _screenCapture.CaptureScreen();
+                    if (!success)
+                        LogCaptureFalseIfNeeded();
                     Updated?.Invoke(this, new ScreenCaptureUpdatedEventArgs(success));
                     consecutiveErrors = 0;
                     _captureError = false;
@@ -395,6 +455,10 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                     if (consecutiveErrors == 1)
                         Logger.Warning(ex, "Screen capture failed for {Display}, will retry", Display.DeviceName);
+
+                    if (OperatingSystem.IsWindows())
+                        AmbilightWindowsDiagnostics.Write(Logger,
+                            $"capture exception for {Display.DeviceName}; backend={CaptureBackendDetails}; consecutiveErrors={consecutiveErrors}; message={ex.GetBaseException().Message}");
 
                     if (likelyGpuFault)
                     {
@@ -462,7 +526,10 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 {
                     _cancellationTokenSource = new CancellationTokenSource();
                     _cancellationToken = _cancellationTokenSource.Token;
-                    _updateTask = Task.Factory.StartNew(UpdateLoop, _cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                    _updateTask = Task.Factory.StartNew(UpdateLoopSafe, _cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                    if (OperatingSystem.IsWindows())
+                        AmbilightWindowsDiagnostics.Write(Logger,
+                            $"started capture update task for {Display.DeviceName}; backend={CaptureBackendDetails}; zones={_zoneCount}; suspended={_suspended}; displayOff={_displayOff}");
                 }
 
                 return zone;
@@ -493,6 +560,34 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         }
 
         public bool CaptureScreen() => false;
+
+        private void LogBlackSkipIfNeeded(string reason)
+        {
+            if (!OperatingSystem.IsWindows())
+                return;
+
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            if (now < _nextBlackSkipLog)
+                return;
+
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"capture loop skip for {Display.DeviceName}: {reason} (suspended={_suspended} displayOff={_displayOff} ddcEverWorked={_ddcEverWorked})");
+            _nextBlackSkipLog = now + TimeSpan.FromSeconds(5);
+        }
+
+        private void LogCaptureFalseIfNeeded()
+        {
+            if (!OperatingSystem.IsWindows())
+                return;
+
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            if (now < _nextCaptureFalseLog)
+                return;
+
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"capture returned no frame for {Display.DeviceName}; backend={CaptureBackendDetails}; suspended={_suspended}; displayOff={_displayOff}; zones={_zoneCount}");
+            _nextCaptureFalseLog = now + TimeSpan.FromSeconds(5);
+        }
 
         public void Restart()
         {

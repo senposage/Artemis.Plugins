@@ -8,6 +8,7 @@
     <RootNamespace>Artemis.Plugins.LayerBrushes.Ambilight</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>

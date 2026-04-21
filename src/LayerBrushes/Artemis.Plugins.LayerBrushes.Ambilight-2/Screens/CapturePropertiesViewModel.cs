@@ -454,9 +454,10 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         IScreenCaptureService? screenCaptureService = await WaitForScreenCaptureService(cancellationToken);
         if (screenCaptureService == null)
         {
+            (string title, string content) = GetScreenCaptureUnavailableMessage();
             await _windowService.CreateContentDialog()
-                .WithTitle("Screen capture still starting")
-                .WithContent("The Linux screen capture backend is still waiting for the desktop portal, or it failed to start. Try opening these settings again after the portal prompt/timeout finishes.")
+                .WithTitle(title)
+                .WithContent(content)
                 .WithDefaultButton(ContentDialogButton.Close)
                 .ShowAsync();
 
@@ -547,6 +548,28 @@ public class CapturePropertiesViewModel : BrushConfigurationViewModel
         }
 
         return null;
+    }
+
+    private static (string Title, string Content) GetScreenCaptureUnavailableMessage()
+    {
+        string? failure = AmbilightBootstrapper.ScreenCaptureInitializationFailure?.GetBaseException().Message;
+        if (OperatingSystem.IsLinux())
+        {
+            string content = string.IsNullOrWhiteSpace(failure)
+                ? "The Linux screen capture backend is still waiting for the desktop portal, or it failed to start. Try opening these settings again after the portal prompt/timeout finishes."
+                : $"The Linux screen capture backend failed to start: {failure}";
+            return ("Screen capture still starting", content);
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            string content = string.IsNullOrWhiteSpace(failure)
+                ? "The Windows screen capture backend is unavailable. WGC will be tried first, then DX11 Desktop Duplication if WGC is unsupported."
+                : $"The Windows screen capture backend failed to start: {failure}";
+            return ("Screen capture unavailable", content);
+        }
+
+        return ("Screen capture unavailable", failure ?? "No screen capture backend is available for this platform.");
     }
 
     private void ExecuteResetRegion()
