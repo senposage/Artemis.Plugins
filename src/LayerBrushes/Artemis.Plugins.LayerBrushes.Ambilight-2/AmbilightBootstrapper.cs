@@ -309,6 +309,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         private void SystemEventsOnDisplaySettingsChanging(object? sender, EventArgs e)
         {
             _logger?.Debug("Display settings changing, suspending all screen captures");
+            AmbilightScreenCapture.MarkDisplayTopologyUnstable(TimeSpan.FromMilliseconds(DisplaySettledDelayMs));
             ScreenCaptureService?.SuspendAllCaptures();
             RequestImmediateRender();
         }
@@ -325,6 +326,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             // (one per stage: topology, resolution, power state). Debounce by resetting
             // the timer on every event — restart only fires once things have settled.
             _logger?.Debug("Display settings changed, waiting {Delay}ms for display state to settle", DisplaySettledDelayMs);
+            AmbilightScreenCapture.MarkDisplayTopologyUnstable(TimeSpan.FromMilliseconds(DisplaySettledDelayMs));
             _displaySettledTimer?.Dispose();
             _displaySettledTimer = new Timer(_ =>
             {
@@ -339,6 +341,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             {
                 case PowerModes.Suspend:
                     _logger?.Debug("System suspend detected, suspending all screen captures");
+                    AmbilightScreenCapture.MarkDisplayTopologyUnstable(TimeSpan.FromMilliseconds(DisplaySettledDelayMs));
+                    AmbilightScreenCapture.LatchWindowsDisplayOff("system suspend");
                     ScreenCaptureService?.SuspendAllCaptures();
                     RequestImmediateRender();
                     break;
@@ -348,6 +352,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                     else
                     {
                         _logger?.Debug("System resumed, restarting ambilight feature");
+                        AmbilightScreenCapture.MarkDisplayTopologyUnstable(TimeSpan.FromMilliseconds(DisplaySettledDelayMs));
                         RestartAmbilightFeature();
                     }
                     break;
@@ -358,9 +363,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         {
             // displayState: 0 = off, 1 = on, 2 = dimmed
             _logger?.Debug("GUID_CONSOLE_DISPLAY_STATE = {State}", displayState);
+            AmbilightWindowsDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(),
+                $"GUID_CONSOLE_DISPLAY_STATE={displayState}");
+            AmbilightScreenCapture.MarkDisplayTopologyUnstable(TimeSpan.FromMilliseconds(DisplaySettledDelayMs));
 
             if (displayState != 0)
             {
+                AmbilightScreenCapture.MarkWindowsDisplayOnOrDim($"GUID_CONSOLE_DISPLAY_STATE={displayState}");
+
                 // Do NOT resume here.
                 //
                 // When a secondary DP monitor is physically powered off, Windows:
@@ -379,6 +389,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             }
 
             _logger?.Debug("Display idle/power-off detected, suspending all screen captures");
+            AmbilightScreenCapture.LatchWindowsDisplayOff("GUID_CONSOLE_DISPLAY_STATE=0");
             ScreenCaptureService?.SuspendAllCaptures();
             RequestImmediateRender();
         }

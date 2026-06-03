@@ -34,6 +34,21 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         private static readonly ConcurrentDictionary<string, AmbilightScreenCapture> s_instances =
             new(StringComparer.OrdinalIgnoreCase);
 
+        private const int DdcUnavailableCrossInferOffThreshold = 3;
+        private const int DdcUnavailableLastResortOffThreshold = 6;
+        private const int NotPresentOffThresholdDuringTopologyChurn = 2;
+        private static readonly TimeSpan CleanDdcStateFreshness = TimeSpan.FromSeconds(15);
+        private static long s_displayTopologyUnstableUntilUnixMs;
+        private static long s_windowsDisplayOffGeneration;
+        private static long s_windowsDisplayOnConfirmedGeneration;
+
+        private enum CleanDdcState
+        {
+            Unknown,
+            On,
+            Off
+        }
+
         // Persists DDC history across RestartAmbilightFeature() so a new instance knows
         // DDC previously worked, enabling it to treat DdcUnavailable as "monitor is sleeping"
         // rather than "monitor has no DDC support".
@@ -82,6 +97,40 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         /// </summary>
         internal static void ClearDisplayOffState() => s_displayOff.Clear();
 
+        internal static void MarkDisplayTopologyUnstable(TimeSpan duration)
+        {
+            long until = DateTimeOffset.UtcNow.Add(duration).ToUnixTimeMilliseconds();
+            long previous;
+            do
+            {
+                previous = Interlocked.Read(ref s_displayTopologyUnstableUntilUnixMs);
+                if (previous >= until)
+                    return;
+            }
+            while (Interlocked.CompareExchange(ref s_displayTopologyUnstableUntilUnixMs, until, previous) != previous);
+        }
+
+        private static bool IsDisplayTopologyUnstable()
+        {
+            long until = Interlocked.Read(ref s_displayTopologyUnstableUntilUnixMs);
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() < until;
+        }
+
+        internal static void LatchWindowsDisplayOff(string reason)
+        {
+            long generation = Interlocked.Increment(ref s_windowsDisplayOffGeneration);
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"windows display-off latch set; generation={generation}; reason={reason}");
+        }
+
+        internal static void MarkWindowsDisplayOnOrDim(string reason)
+        {
+            long generation = Volatile.Read(ref s_windowsDisplayOffGeneration);
+            Volatile.Write(ref s_windowsDisplayOnConfirmedGeneration, generation);
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"windows display on/dim confirmed; generation={generation}; reason={reason}");
+        }
+
         // Single shared timer — polls every 5 s, outside of every capture's own loop.
         private static readonly Timer s_powerPollTimer = new Timer(OnPowerPollTick, null,
             TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
@@ -117,6 +166,13 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         private bool _captureLoopEntered;
         private DateTimeOffset _nextBlackSkipLog = DateTimeOffset.MinValue;
         private DateTimeOffset _nextCaptureFalseLog = DateTimeOffset.MinValue;
+        private CleanDdcState _lastCleanDdcState = CleanDdcState.Unknown;
+        private DateTimeOffset _lastCleanDdcStateAt = DateTimeOffset.MinValue;
+        private int _consecutiveCleanOn;
+        private int _consecutiveCleanOff;
+        private int _consecutiveDdcUnavailable;
+        private int _consecutiveNotPresent;
+        private long _releasedWindowsDisplayOffGeneration;
 
         private Task? _updateTask;
         private CancellationTokenSource? _cancellationTokenSource;
@@ -124,7 +180,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         public Display Display => _screenCapture.Display;
         public bool HasCaptureError => _captureError;
-        public bool ShouldOutputBlack => _suspended || _displayOff;
+        public bool ShouldOutputBlack => _suspended || _displayOff || IsWindowsDisplayOffLatchedForThisInstance();
         public bool IsSuspended => _suspended;
         public string CaptureBackendDetails => _screenCapture is ICaptureBackendStatus status
             ? status.CaptureBackendDetails
@@ -266,60 +322,191 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             switch (MonitorPowerState.QueryPowerState(Display.DeviceName))
             {
                 case MonitorPowerState.PowerState.On:
-                    _ddcEverWorked = true;
-                    s_ddcEverWorked[Display.DeviceName] = true;
-                    bool wasOff = _displayOff;
-                    bool wasSuspended = _suspended;
-                    if (_displayOff) { _displayOff = false; s_displayOff[Display.DeviceName] = false; }
-                    if (_suspended) _suspended = false;
-                    if (wasOff || wasSuspended)
+                    RecordCleanDdcState(CleanDdcState.On);
+                    bool windowsDisplayOffLatched = IsWindowsDisplayOffLatchedForThisInstance();
+                    if (windowsDisplayOffLatched && !CanReleaseWindowsDisplayOffLatch())
                     {
-                        Logger.Debug("Display available: {Display} (wasOff={Off} wasSuspended={Susp})", Display.DeviceName, wasOff, wasSuspended);
                         AmbilightWindowsDiagnostics.Write(Logger,
-                            $"display available: {Display.DeviceName} (wasOff={wasOff} wasSuspended={wasSuspended})");
+                            $"DDC on held before releasing blackout: {Display.DeviceName} cleanOn={_consecutiveCleanOn} displayOff={_displayOff} windowsDisplayOff={windowsDisplayOffLatched} windowsOnConfirmed=False topologyUnstable={IsDisplayTopologyUnstable()}");
+                    }
+                    else if (((windowsDisplayOffLatched || (_displayOff && IsDisplayTopologyUnstable())) && _consecutiveCleanOn < 2))
+                    {
+                        AmbilightWindowsDiagnostics.Write(Logger,
+                            $"DDC on held before releasing blackout: {Display.DeviceName} cleanOn={_consecutiveCleanOn} displayOff={_displayOff} windowsDisplayOff={windowsDisplayOffLatched} windowsOnConfirmed=True topologyUnstable={IsDisplayTopologyUnstable()}");
+                    }
+                    else
+                    {
+                        CommitDisplayOn();
                     }
                     break;
 
                 case MonitorPowerState.PowerState.Off:
-                    _ddcEverWorked = true;
-                    s_ddcEverWorked[Display.DeviceName] = true;
-                    if (!_displayOff)
-                    {
-                        _displayOff = true;
-                        s_displayOff[Display.DeviceName] = true;
-                        Logger.Debug("Display DPMS off: {Display}", Display.DeviceName);
-                        AmbilightWindowsDiagnostics.Write(Logger, $"display DPMS off: {Display.DeviceName}");
-                    }
+                    RecordCleanDdcState(CleanDdcState.Off);
+                    CommitDisplayOff("display DPMS off", ddcWorked: true);
                     break;
 
                 case MonitorPowerState.PowerState.NotPresent:
-                    if (!_displayOff)
+                    RecordTopologyUnavailable();
+                    if (!_displayOff &&
+                        (!IsDisplayTopologyUnstable() || _consecutiveNotPresent >= NotPresentOffThresholdDuringTopologyChurn))
                     {
-                        _displayOff = true;
-                        s_displayOff[Display.DeviceName] = true;
-                        Logger.Debug("Display not present: {Display}", Display.DeviceName);
-                        AmbilightWindowsDiagnostics.Write(Logger, $"display not present: {Display.DeviceName}");
+                        CommitDisplayOff("display not present", ddcWorked: false);
                     }
                     break;
 
                 case MonitorPowerState.PowerState.DdcUnavailable:
-                    if (_ddcEverWorked && !_displayOff)
+                    RecordDdcUnavailable();
+                    if (!_ddcEverWorked)
+                        ReleaseWindowsDisplayOffLatchForThisInstance("DDC unavailable with no previous DDC success");
+
+                    if (!_ddcEverWorked || _displayOff)
+                        break;
+
+                    if (_consecutiveDdcUnavailable >= DdcUnavailableCrossInferOffThreshold &&
+                        HasRecentCleanDdcStateFromOtherDisplay(CleanDdcState.Off))
                     {
-                        // DDC was working before, now silent → deep sleep / physical off.
-                        _displayOff = true;
-                        s_displayOff[Display.DeviceName] = true;
-                        Logger.Debug("DDC silent (prev. worked): {Display} treated as off", Display.DeviceName);
-                        AmbilightWindowsDiagnostics.Write(Logger, $"DDC silent after previously working: {Display.DeviceName} treated as off");
+                        CommitDisplayOff("DDC unavailable; inferred off from another clean DDC-off display", ddcWorked: false);
                     }
-                    else if (_displayOff && !_ddcEverWorked)
+                    else if (_consecutiveDdcUnavailable >= DdcUnavailableLastResortOffThreshold &&
+                             !HasRecentCleanDdcStateFromOtherDisplay(CleanDdcState.On))
                     {
-                        _displayOff = false;
-                        s_displayOff[Display.DeviceName] = false;
+                        CommitDisplayOff("DDC unavailable last resort after repeated failures", ddcWorked: false);
+                    }
+                    else if (_consecutiveDdcUnavailable == DdcUnavailableCrossInferOffThreshold)
+                    {
                         AmbilightWindowsDiagnostics.Write(Logger,
-                            $"DDC unavailable and no previous DDC success for {Display.DeviceName}; clearing inherited display-off state");
+                            $"DDC unavailable for {Display.DeviceName}; holding current state (count={_consecutiveDdcUnavailable}, ddcEverWorked={_ddcEverWorked})");
                     }
                     break;
             }
+        }
+
+        private void RecordCleanDdcState(CleanDdcState state)
+        {
+            _ddcEverWorked = true;
+            s_ddcEverWorked[Display.DeviceName] = true;
+            _lastCleanDdcState = state;
+            _lastCleanDdcStateAt = DateTimeOffset.UtcNow;
+            _consecutiveDdcUnavailable = 0;
+            _consecutiveNotPresent = 0;
+
+            if (state == CleanDdcState.On)
+            {
+                _consecutiveCleanOn++;
+                _consecutiveCleanOff = 0;
+            }
+            else if (state == CleanDdcState.Off)
+            {
+                _consecutiveCleanOff++;
+                _consecutiveCleanOn = 0;
+            }
+        }
+
+        private void RecordDdcUnavailable()
+        {
+            _consecutiveDdcUnavailable++;
+            _consecutiveNotPresent = 0;
+            _consecutiveCleanOn = 0;
+            _consecutiveCleanOff = 0;
+        }
+
+        private void RecordTopologyUnavailable()
+        {
+            _consecutiveNotPresent++;
+            _consecutiveDdcUnavailable = 0;
+            _consecutiveCleanOn = 0;
+            _consecutiveCleanOff = 0;
+        }
+
+        private void CommitDisplayOn()
+        {
+            bool wasOff = _displayOff;
+            bool wasSuspended = _suspended;
+            bool wasWindowsDisplayOffLatched = IsWindowsDisplayOffLatchedForThisInstance();
+            ReleaseWindowsDisplayOffLatchForThisInstance("clean DDC on");
+
+            if (_displayOff)
+            {
+                _displayOff = false;
+                s_displayOff[Display.DeviceName] = false;
+            }
+
+            if (_suspended)
+                _suspended = false;
+
+            if (wasOff || wasSuspended || wasWindowsDisplayOffLatched)
+            {
+                Logger.Debug("Display available: {Display} (wasOff={Off} wasSuspended={Susp} wasWindowsDisplayOffLatched={WindowsLatch})",
+                    Display.DeviceName,
+                    wasOff,
+                    wasSuspended,
+                    wasWindowsDisplayOffLatched);
+                AmbilightWindowsDiagnostics.Write(Logger,
+                    $"display available: {Display.DeviceName} (wasOff={wasOff} wasSuspended={wasSuspended} wasWindowsDisplayOffLatched={wasWindowsDisplayOffLatched})");
+            }
+        }
+
+        private bool IsWindowsDisplayOffLatchedForThisInstance()
+        {
+            return OperatingSystem.IsWindows() &&
+                   Volatile.Read(ref s_windowsDisplayOffGeneration) > _releasedWindowsDisplayOffGeneration;
+        }
+
+        private void ReleaseWindowsDisplayOffLatchForThisInstance(string reason)
+        {
+            long generation = Volatile.Read(ref s_windowsDisplayOffGeneration);
+            if (generation <= _releasedWindowsDisplayOffGeneration)
+                return;
+
+            if (!CanReleaseWindowsDisplayOffLatch())
+            {
+                AmbilightWindowsDiagnostics.Write(Logger,
+                    $"windows display-off latch release held for {Display.DeviceName}; generation={generation}; reason={reason}; windowsOnConfirmed=False");
+                return;
+            }
+
+            _releasedWindowsDisplayOffGeneration = generation;
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"windows display-off latch released for {Display.DeviceName}; generation={generation}; reason={reason}");
+        }
+
+        private static bool CanReleaseWindowsDisplayOffLatch()
+        {
+            long offGeneration = Volatile.Read(ref s_windowsDisplayOffGeneration);
+            return Volatile.Read(ref s_windowsDisplayOnConfirmedGeneration) >= offGeneration;
+        }
+
+        private void CommitDisplayOff(string reason, bool ddcWorked)
+        {
+            if (ddcWorked)
+            {
+                _ddcEverWorked = true;
+                s_ddcEverWorked[Display.DeviceName] = true;
+            }
+
+            if (_displayOff)
+                return;
+
+            _displayOff = true;
+            s_displayOff[Display.DeviceName] = true;
+            Logger.Debug("{Reason}: {Display}", reason, Display.DeviceName);
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"{reason}: {Display.DeviceName} (ddcUnavailable={_consecutiveDdcUnavailable} notPresent={_consecutiveNotPresent})");
+        }
+
+        private bool HasRecentCleanDdcStateFromOtherDisplay(CleanDdcState state)
+        {
+            DateTimeOffset cutoff = DateTimeOffset.UtcNow - CleanDdcStateFreshness;
+            foreach (AmbilightScreenCapture capture in s_instances.Values)
+            {
+                if (ReferenceEquals(capture, this))
+                    continue;
+
+                if (capture._lastCleanDdcState == state && capture._lastCleanDdcStateAt >= cutoff)
+                    return true;
+            }
+
+            return false;
         }
 
         #endregion
@@ -365,6 +552,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                     prevShouldOutputBlack = currentBlack;
                     Logger.Information("{Display} ShouldOutputBlack → {Value} (suspended={S} displayOff={D})",
                         Display.DeviceName, currentBlack, _suspended, _displayOff);
+                    AmbilightWindowsDiagnostics.Write(Logger,
+                        $"ShouldOutputBlack changed for {Display.DeviceName}: {currentBlack} (suspended={_suspended} displayOff={_displayOff} windowsDisplayOff={IsWindowsDisplayOffLatchedForThisInstance()})");
                 }
 
                 if (_suspended)
@@ -377,6 +566,13 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 if (_displayOff)
                 {
                     LogBlackSkipIfNeeded("displayOff");
+                    Thread.Sleep(200);
+                    continue;
+                }
+
+                if (IsWindowsDisplayOffLatchedForThisInstance())
+                {
+                    LogBlackSkipIfNeeded("windowsDisplayOff");
                     Thread.Sleep(200);
                     continue;
                 }
@@ -571,7 +767,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 return;
 
             AmbilightWindowsDiagnostics.Write(Logger,
-                $"capture loop skip for {Display.DeviceName}: {reason} (suspended={_suspended} displayOff={_displayOff} ddcEverWorked={_ddcEverWorked})");
+                $"capture loop skip for {Display.DeviceName}: {reason} (suspended={_suspended} displayOff={_displayOff} windowsDisplayOff={IsWindowsDisplayOffLatchedForThisInstance()} ddcEverWorked={_ddcEverWorked})");
             _nextBlackSkipLog = now + TimeSpan.FromSeconds(5);
         }
 
@@ -585,7 +781,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 return;
 
             AmbilightWindowsDiagnostics.Write(Logger,
-                $"capture returned no frame for {Display.DeviceName}; backend={CaptureBackendDetails}; suspended={_suspended}; displayOff={_displayOff}; zones={_zoneCount}");
+                $"capture returned no frame for {Display.DeviceName}; backend={CaptureBackendDetails}; suspended={_suspended}; displayOff={_displayOff}; windowsDisplayOff={IsWindowsDisplayOffLatchedForThisInstance()}; zones={_zoneCount}");
             _nextCaptureFalseLog = now + TimeSpan.FromSeconds(5);
         }
 

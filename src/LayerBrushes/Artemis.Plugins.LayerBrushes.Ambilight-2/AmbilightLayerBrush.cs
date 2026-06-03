@@ -26,7 +26,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
         private int _frameCounter;
 
         // Smoothing
+        private const int TemporalSmoothingFrameCount = 3;
         private SKBitmap? _smoothedBitmap;
+        private readonly SKBitmap?[] _frameHistory = new SKBitmap?[TemporalSmoothingFrameCount];
+        private int _frameHistoryIndex;
+        private int _frameHistoryCount;
 
         // Cached color adjustment state — avoids recreating GPU resources every frame
         private SKPaint? _colorPaint;
@@ -97,51 +101,25 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                                                       properties.BlackBarDetectionTop, properties.BlackBarDetectionBottom,
                                                       properties.BlackBarDetectionLeft, properties.BlackBarDetectionRight);
 
-                    // Auto-exposure: compute average scene luminance and smooth a scale factor.
-                    // fast dim (rate 0.10) so a flash is absorbed quickly;
-                    // slow recover (rate 0.02) so the LEDs don't strobe when content changes.
-                    float autoExpStrength = properties.AutoExposureStrength.CurrentValue;
-                    if (autoExpStrength > 0f)
-                    {
-                        float avgLum = ComputeAverageLuminance(image);
-                        float target = 1f / (1f + avgLum * autoExpStrength * 4f);
-                        float rate = target < _exposureScale ? 0.10f : 0.02f;
-                        _exposureScale += (target - _exposureScale) * rate;
-                    }
-                    else
-                    {
-                        _exposureScale = 1f;
-                    }
-
                     fixed (byte* img = image)
                     {
                         using SKImage skImage = SKImage.FromPixels(new SKImageInfo(image.Width, image.Height, SKColorType.Bgra8888, SKAlphaType.Opaque), (nint)img, image.RawStride);
 
-                        // Apply smoothing (temporal blend with previous frame)
+                        // Temporal buffering sits after capture/crop and before color/exposure
+                        // processing, so one rogue capture frame cannot kick the whole pipeline.
                         float smoothing = Math.Clamp(properties.SmoothingFactor.CurrentValue, 0f, 0.95f);
                         if (smoothing > 0f)
                         {
-                            // Ensure smoothed bitmap matches current frame size
-                            if (_smoothedBitmap == null || _smoothedBitmap.Width != image.Width || _smoothedBitmap.Height != image.Height)
-                            {
-                                _smoothedBitmap?.Dispose();
-                                _smoothedBitmap = new SKBitmap(image.Width, image.Height, SKColorType.Bgra8888, SKAlphaType.Opaque);
-                                using var initCanvas = new SKCanvas(_smoothedBitmap);
-                                initCanvas.DrawImage(skImage, 0, 0);
-                            }
-                            else
-                            {
-                                // Blend: smoothedBitmap = smoothedBitmap * smoothing + currentFrame * (1 - smoothing)
-                                using var blendCanvas = new SKCanvas(_smoothedBitmap);
-                                using var blendPaint = new SKPaint();
-                                blendPaint.Color = new SKColor(255, 255, 255, (byte)((1f - smoothing) * 255));
-                                blendCanvas.DrawImage(skImage, 0, 0, blendPaint);
-                            }
-
+                            EnsureTemporalSmoothingBuffers(image.Width, image.Height);
+                            StoreTemporalFrame(skImage);
+                            BlendTemporalFrames(smoothing);
+                            UpdateAutoExposure(properties, ComputeAverageLuminance(_smoothedBitmap!));
                             DrawSmoothedWithColorAdjustments(canvas, bounds, paint, properties, _exposureScale);
                         }
                         else
                         {
+                            DisposeTemporalSmoothingBuffers();
+                            UpdateAutoExposure(properties, ComputeAverageLuminance(image));
                             DrawWithColorAdjustments(canvas, skImage, bounds, paint, properties, _exposureScale);
                         }
                     }
@@ -165,8 +143,134 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         private void RenderBlack(SKCanvas canvas, SKRect bounds)
         {
-            _smoothedBitmap?.Erase(SKColors.Black);
+            ResetTemporalSmoothingBuffers();
             canvas.DrawColor(SKColors.Black);
+        }
+
+        private void EnsureTemporalSmoothingBuffers(int width, int height)
+        {
+            if (_smoothedBitmap != null && _smoothedBitmap.Width == width && _smoothedBitmap.Height == height)
+                return;
+
+            DisposeTemporalSmoothingBuffers();
+            _smoothedBitmap = new SKBitmap(width, height, SKColorType.Bgra8888, SKAlphaType.Opaque);
+        }
+
+        private void StoreTemporalFrame(SKImage image)
+        {
+            if (_smoothedBitmap == null)
+                return;
+
+            SKBitmap? target = _frameHistory[_frameHistoryIndex];
+            if (target == null || target.Width != _smoothedBitmap.Width || target.Height != _smoothedBitmap.Height)
+            {
+                target?.Dispose();
+                target = new SKBitmap(_smoothedBitmap.Width, _smoothedBitmap.Height, SKColorType.Bgra8888, SKAlphaType.Opaque);
+                _frameHistory[_frameHistoryIndex] = target;
+            }
+
+            using (var historyCanvas = new SKCanvas(target))
+                historyCanvas.DrawImage(image, 0, 0);
+
+            _frameHistoryIndex = (_frameHistoryIndex + 1) % TemporalSmoothingFrameCount;
+            if (_frameHistoryCount < TemporalSmoothingFrameCount)
+                _frameHistoryCount++;
+        }
+
+        private unsafe void BlendTemporalFrames(float smoothing)
+        {
+            if (_smoothedBitmap == null || _frameHistoryCount == 0)
+                return;
+
+            int frameCount = _frameHistoryCount;
+            var frames = new SKBitmap[frameCount];
+            var weights = new float[frameCount];
+
+            weights[0] = frameCount == 1 ? 1f : 1f - smoothing;
+            int previousCount = frameCount - 1;
+            float previousWeightTotal = previousCount * (previousCount + 1) / 2f;
+
+            for (int age = 0; age < frameCount; age++)
+            {
+                int slot = GetTemporalFrameSlot(age);
+                frames[age] = _frameHistory[slot]!;
+
+                if (age > 0)
+                    weights[age] = smoothing * (previousCount - age + 1) / previousWeightTotal;
+            }
+
+            IntPtr destinationPixels = _smoothedBitmap.GetPixels();
+            if (destinationPixels == IntPtr.Zero)
+                return;
+
+            int width = _smoothedBitmap.Width;
+            int height = _smoothedBitmap.Height;
+            int destinationRowBytes = _smoothedBitmap.RowBytes;
+            var framePixels = new IntPtr[frameCount];
+            var frameRowBytes = new int[frameCount];
+
+            for (int i = 0; i < frameCount; i++)
+            {
+                framePixels[i] = frames[i].GetPixels();
+                frameRowBytes[i] = frames[i].RowBytes;
+            }
+
+            byte* dstBase = (byte*)destinationPixels.ToPointer();
+            for (int y = 0; y < height; y++)
+            {
+                byte* dstRow = dstBase + y * destinationRowBytes;
+                for (int x = 0; x < width; x++)
+                {
+                    float b = 0f;
+                    float g = 0f;
+                    float r = 0f;
+
+                    for (int i = 0; i < frameCount; i++)
+                    {
+                        byte* src = (byte*)framePixels[i].ToPointer() + y * frameRowBytes[i] + x * 4;
+                        float weight = weights[i];
+                        b += src[0] * weight;
+                        g += src[1] * weight;
+                        r += src[2] * weight;
+                    }
+
+                    byte* dst = dstRow + x * 4;
+                    dst[0] = (byte)Math.Clamp((int)(b + 0.5f), 0, 255);
+                    dst[1] = (byte)Math.Clamp((int)(g + 0.5f), 0, 255);
+                    dst[2] = (byte)Math.Clamp((int)(r + 0.5f), 0, 255);
+                    dst[3] = 255;
+                }
+            }
+        }
+
+        private int GetTemporalFrameSlot(int age)
+        {
+            int slot = _frameHistoryIndex - 1 - age;
+            while (slot < 0)
+                slot += TemporalSmoothingFrameCount;
+            return slot % TemporalSmoothingFrameCount;
+        }
+
+        private void ResetTemporalSmoothingBuffers()
+        {
+            _smoothedBitmap?.Erase(SKColors.Black);
+            foreach (SKBitmap? frame in _frameHistory)
+                frame?.Erase(SKColors.Black);
+            _frameHistoryIndex = 0;
+            _frameHistoryCount = 0;
+        }
+
+        private void DisposeTemporalSmoothingBuffers()
+        {
+            _smoothedBitmap?.Dispose();
+            _smoothedBitmap = null;
+            for (int i = 0; i < _frameHistory.Length; i++)
+            {
+                _frameHistory[i]?.Dispose();
+                _frameHistory[i] = null;
+            }
+            _frameHistoryIndex = 0;
+            _frameHistoryCount = 0;
         }
 
         /// <summary>
@@ -397,6 +501,46 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                     }
                 }
                 return (float)(sum / ((double)image.Width * image.Height * 10000.0 * 255.0));
+            }
+        }
+
+        private static unsafe float ComputeAverageLuminance(SKBitmap bitmap)
+        {
+            if (bitmap.Width == 0 || bitmap.Height == 0)
+                return 0f;
+
+            IntPtr pixels = bitmap.GetPixels();
+            if (pixels == IntPtr.Zero)
+                return 0f;
+
+            long sum = 0;
+            byte* ptr = (byte*)pixels.ToPointer();
+            for (int y = 0; y < bitmap.Height; y++)
+            {
+                byte* row = ptr + y * bitmap.RowBytes;
+                for (int x = 0; x < bitmap.Width; x++)
+                {
+                    byte* p = row + x * 4; // BGRA: p[0]=B, p[1]=G, p[2]=R
+                    sum += p[2] * 2126L + p[1] * 7152L + p[0] * 722L;
+                }
+            }
+
+            return (float)(sum / ((double)bitmap.Width * bitmap.Height * 10000.0 * 255.0));
+        }
+
+        private void UpdateAutoExposure(AmbilightCaptureProperties properties, float averageLuminance)
+        {
+            // Fast dim / slow recover so flashes are absorbed without pumping on normal motion.
+            float autoExpStrength = properties.AutoExposureStrength.CurrentValue;
+            if (autoExpStrength > 0f)
+            {
+                float target = 1f / (1f + averageLuminance * autoExpStrength * 4f);
+                float rate = target < _exposureScale ? 0.10f : 0.02f;
+                _exposureScale += (target - _exposureScale) * rate;
+            }
+            else
+            {
+                _exposureScale = 1f;
             }
         }
 

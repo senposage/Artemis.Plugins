@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.IO;
 using Serilog;
 
@@ -18,14 +17,12 @@ internal static class AmbilightWindowsDiagnostics
         }
     }
 
-    [Conditional("DEBUG")]
     public static void Write(ILogger logger, string message)
     {
         logger.Debug("[Ambilight/Windows] {Message}", message);
         Write(message);
     }
 
-    [Conditional("DEBUG")]
     public static void Write(string message)
     {
         try
