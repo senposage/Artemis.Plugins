@@ -95,7 +95,10 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
                 RefImage<ColorBGRA> croppedImage = processedImage.RemoveBlackBars(_blackBarThreshold, _blackBarDetectionTop, _blackBarDetectionBottom, _blackBarDetectionLeft, _blackBarDetectionRight);
 
                 if ((ProcessedPreview == null) || (Math.Abs(ProcessedPreview.Size.Width - croppedImage.Width) > 0.001) || (Math.Abs(ProcessedPreview.Size.Height - croppedImage.Height) > 0.001))
+                {
+                    ProcessedPreview?.Dispose();
                     ProcessedPreview = new WriteableBitmap(new PixelSize(croppedImage.Width, croppedImage.Height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Opaque);
+                }
 
                 WritePixels(ProcessedPreview, croppedImage);
             }
@@ -114,8 +117,18 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
 
     public void Dispose()
     {
-        AmbilightBootstrapper.ScreenCaptureService!.GetScreenCapture(Display).UnregisterCaptureZone(_captureZone);
         _isDisposed = true;
+        try
+        {
+            AmbilightBootstrapper.ScreenCaptureService!.GetScreenCapture(Display).UnregisterCaptureZone(_captureZone);
+            if (_processedCaptureZone != null)
+                AmbilightBootstrapper.ScreenCaptureService.GetScreenCapture(Display).UnregisterCaptureZone(_processedCaptureZone);
+        }
+        finally
+        {
+            Preview.Dispose();
+            ProcessedPreview?.Dispose();
+        }
     }
 
     #endregion

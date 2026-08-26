@@ -48,7 +48,6 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         private Task? _updateTask;
         private CancellationTokenSource? _cancellationTokenSource;
-        private CancellationToken _cancellationToken = CancellationToken.None;
 
         public Display Display => _screenCapture.Display;
 
@@ -119,7 +118,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         }
 
 
-        private void UpdateLoop()
+        private void UpdateLoop(CancellationToken cancellationToken)
         {
             int consecutiveErrors = 0;
             var stopwatch = Stopwatch.StartNew();
@@ -128,7 +127,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
             while (true)
             {
-                _cancellationToken.ThrowIfCancellationRequested();
+                cancellationToken.ThrowIfCancellationRequested();
 
                 // When suspended (display change incoming), sleep instead of calling into D3D11.
                 if (_suspended)
@@ -169,7 +168,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 try
                 {
-                    bool success = _screenCapture.CaptureScreen();
+                    bool success;
+                    lock (_screenCapture)
+                        success = _screenCapture.CaptureScreen();
                     Updated?.Invoke(this, new ScreenCaptureUpdatedEventArgs(success));
                     consecutiveErrors = 0;
                     _captureError = false;
@@ -197,7 +198,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                         try
                         {
                             Logger.Information("Attempting to restart screen capture for {Display}", Display.DeviceName);
-                            _screenCapture.Restart();
+                            lock (_screenCapture)
+                                _screenCapture.Restart();
                         }
                         catch (Exception restartEx)
                         {
@@ -279,9 +281,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 if (_updateTask == null)
                 {
-                    _cancellationTokenSource = new CancellationTokenSource();
-                    _cancellationToken = _cancellationTokenSource.Token;
-                    _updateTask = Task.Factory.StartNew(UpdateLoop, _cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                    CancellationTokenSource cancellationTokenSource = new();
+                    CancellationToken cancellationToken = cancellationTokenSource.Token;
+                    _cancellationTokenSource = cancellationTokenSource;
+                    _updateTask = Task.Factory.StartNew(
+                        () => UpdateLoop(cancellationToken),
+                        cancellationToken,
+                        TaskCreationOptions.LongRunning,
+                        TaskScheduler.Default);
                 }
 
                 return captureZone;
@@ -299,8 +306,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 if ((_zoneCount == 0) && (_updateTask != null))
                 {
-                    _cancellationTokenSource?.Cancel();
-                    _updateTask = null;
+                    StopUpdateTaskNoWait();
+                    _screenCapture.Restart();
                 }
 
                 return result;
@@ -315,14 +322,56 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         public bool CaptureScreen() => false;
 
-        public void Restart() => _screenCapture.Restart();
+        public void Restart()
+        {
+            lock (_screenCapture)
+                _screenCapture.Restart();
+        }
 
         public void Dispose()
         {
-            _cancellationTokenSource?.Cancel();
+            CancellationTokenSource? cancellationTokenSource = _cancellationTokenSource;
+            Task? updateTask = _updateTask;
+
+            _cancellationTokenSource = null;
             _updateTask = null;
 
-            _screenCapture.Dispose();
+            cancellationTokenSource?.Cancel();
+            if (updateTask != null && Task.CurrentId != updateTask.Id)
+            {
+                try { updateTask.Wait(TimeSpan.FromSeconds(2)); }
+                catch { /* Best effort: the lock below prevents disposal races. */ }
+            }
+
+            lock (_screenCapture)
+                _screenCapture.Dispose();
+
+            cancellationTokenSource?.Dispose();
+        }
+
+        private void StopUpdateTaskNoWait()
+        {
+            CancellationTokenSource? cancellationTokenSource = _cancellationTokenSource;
+            Task? updateTask = _updateTask;
+
+            _cancellationTokenSource = null;
+            _updateTask = null;
+
+            if (cancellationTokenSource == null)
+                return;
+
+            cancellationTokenSource.Cancel();
+            if (updateTask == null)
+            {
+                cancellationTokenSource.Dispose();
+                return;
+            }
+
+            updateTask.ContinueWith(
+                _ => cancellationTokenSource.Dispose(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         #endregion

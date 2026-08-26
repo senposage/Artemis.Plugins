@@ -100,7 +100,10 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
                 RefImage<ColorBGRA> croppedImage = processedImage.RemoveBlackBars(_blackBarThreshold, _blackBarDetectionTop, _blackBarDetectionBottom, _blackBarDetectionLeft, _blackBarDetectionRight);
 
                 if ((ProcessedPreview == null) || (Math.Abs(ProcessedPreview.Size.Width - croppedImage.Width) > 0.001) || (Math.Abs(ProcessedPreview.Size.Height - croppedImage.Height) > 0.001))
+                {
+                    ProcessedPreview?.Dispose();
                     ProcessedPreview = new WriteableBitmap(new PixelSize(croppedImage.Width, croppedImage.Height), new Vector(96, 96), PixelFormat.Bgra8888, AlphaFormat.Opaque);
+                }
 
                 WritePixels(ProcessedPreview, croppedImage);
             }
@@ -134,6 +137,9 @@ public sealed class DisplayPreview : ReactiveObject, IDisposable
         {
             Logger.Debug(ex, "Ignoring display preview dispose failure for {Display}", Display.DeviceName);
         }
+
+        Preview.Dispose();
+        ProcessedPreview?.Dispose();
     }
 
     #endregion

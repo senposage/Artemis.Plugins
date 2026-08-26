@@ -176,7 +176,6 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         private Task? _updateTask;
         private CancellationTokenSource? _cancellationTokenSource;
-        private CancellationToken _cancellationToken = CancellationToken.None;
 
         public Display Display => _screenCapture.Display;
         public bool HasCaptureError => _captureError;
@@ -513,11 +512,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
         #region Capture loop
 
-        private void UpdateLoopSafe()
+        private void UpdateLoopSafe(CancellationToken cancellationToken)
         {
             try
             {
-                UpdateLoop();
+                UpdateLoop(cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -533,7 +532,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             }
         }
 
-        private void UpdateLoop()
+        private void UpdateLoop(CancellationToken cancellationToken)
         {
             int consecutiveErrors = 0;
             var stopwatch = Stopwatch.StartNew();
@@ -544,7 +543,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
             while (true)
             {
-                _cancellationToken.ThrowIfCancellationRequested();
+                cancellationToken.ThrowIfCancellationRequested();
 
                 bool currentBlack = ShouldOutputBlack;
                 if (currentBlack != prevShouldOutputBlack)
@@ -720,9 +719,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 if (_updateTask == null)
                 {
-                    _cancellationTokenSource = new CancellationTokenSource();
-                    _cancellationToken = _cancellationTokenSource.Token;
-                    _updateTask = Task.Factory.StartNew(UpdateLoopSafe, _cancellationToken, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+                    CancellationTokenSource cancellationTokenSource = new();
+                    CancellationToken cancellationToken = cancellationTokenSource.Token;
+                    _cancellationTokenSource = cancellationTokenSource;
+                    _updateTask = Task.Factory.StartNew(
+                        () => UpdateLoopSafe(cancellationToken),
+                        cancellationToken,
+                        TaskCreationOptions.LongRunning,
+                        TaskScheduler.Default);
                     if (OperatingSystem.IsWindows())
                         AmbilightWindowsDiagnostics.Write(Logger,
                             $"started capture update task for {Display.DeviceName}; backend={CaptureBackendDetails}; zones={_zoneCount}; suspended={_suspended}; displayOff={_displayOff}");
@@ -741,8 +745,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
                 if (_zoneCount == 0 && _updateTask != null)
                 {
-                    _cancellationTokenSource?.Cancel();
-                    _updateTask = null;
+                    StopUpdateTaskNoWait();
+                    _screenCapture.Restart();
                 }
 
                 return result;
@@ -792,6 +796,31 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         }
 
         #endregion
+
+        private void StopUpdateTaskNoWait()
+        {
+            CancellationTokenSource? cancellationTokenSource = _cancellationTokenSource;
+            Task? updateTask = _updateTask;
+
+            _cancellationTokenSource = null;
+            _updateTask = null;
+
+            if (cancellationTokenSource == null)
+                return;
+
+            cancellationTokenSource.Cancel();
+            if (updateTask == null)
+            {
+                cancellationTokenSource.Dispose();
+                return;
+            }
+
+            updateTask.ContinueWith(
+                _ => cancellationTokenSource.Dispose(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
 
     }
 }
