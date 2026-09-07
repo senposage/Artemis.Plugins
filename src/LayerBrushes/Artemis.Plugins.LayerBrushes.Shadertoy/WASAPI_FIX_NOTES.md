@@ -88,6 +88,7 @@ Hot-path packet, buffer, texture-fill, and per-callback audio logs were removed 
 - Added startup exception propagation so callers can log the exact WASAPI initialization failure.
 - Changed default endpoint selection to use the multimedia render role to match the known-good NAudio plugin behavior, instead of binding the console-role render endpoint.
 - Expanded sample decoding so the raw WASAPI path now handles more shared-mode PCM formats instead of only accepting float32 and int16.
+- Added speaker-layout-aware stereo downmixing for render endpoints with more than two channels, and manual application of WASAPI endpoint channel volume scalars so Windows left/right balance changes affect the Shadertoy audio texture even when the loopback stream is delivered before driver balance is applied.
 - Render loopback mode now stays on the multimedia render endpoint instead of auto-switching to capture devices.
 - Added explicit endpoint selection by persisted WASAPI endpoint ID.
 - Added a clearer unsupported-format log when the mix format is not one of the formats we currently decode.

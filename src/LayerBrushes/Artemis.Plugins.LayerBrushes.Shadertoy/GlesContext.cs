@@ -1,5 +1,6 @@
 using System;
 using static Artemis.Plugins.LayerBrushes.Shadertoy.EglNative;
+using static Artemis.Plugins.LayerBrushes.Shadertoy.GlesNative;
 
 namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 
@@ -98,6 +99,7 @@ internal sealed class GlesContext : IDisposable
         bool ok = eglMakeCurrent(_display, _surface, _surface, _context);
         ShaderLogger.Log($"EGL: makeCurrent={ok} err=0x{eglGetError():X4}");
         EglCheck(!ok, "eglMakeCurrent");
+        ShaderLogger.Log($"GL: vendor='{GetString(GL_VENDOR)}' renderer='{GetString(GL_RENDERER)}' version='{GetString(GL_VERSION)}'");
 
         ShaderLogger.Log("EGL: Initialize complete");
     }

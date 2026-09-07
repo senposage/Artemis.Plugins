@@ -16,7 +16,7 @@
       <Grid RowDefinitions="Auto,Auto,Auto,Auto,*">
 
         <!-- Row 0: Width / Height / MaxFps / Audio checkbox -->
-        <Grid Grid.Row="0" ColumnDefinitions="*,*,*,Auto">
+        <Grid Grid.Row="0" ColumnDefinitions="*,*,*,*,Auto">
           <StackPanel Grid.Column="0">
             <Label>Width</Label>
             <controls:NumberBox Margin="5,0,5,5"
@@ -50,7 +50,18 @@
                                 ValidationMode="InvalidInputOverwritten"
                                 LostFocus="InputFinished" />
           </StackPanel>
-          <StackPanel Grid.Column="3" Margin="8,18,5,5" VerticalAlignment="Top" Spacing="4">
+          <StackPanel Grid.Column="3">
+            <Label>Preview FPS</Label>
+            <controls:NumberBox Margin="5,0,5,5"
+                                Value="{CompiledBinding PreviewFps}"
+                                attachedProperties:NumberBoxAssist.SuffixText="fps"
+                                HorizontalAlignment="Stretch"
+                                Minimum="1" Maximum="60"
+                                AcceptsExpression="True"
+                                ValidationMode="InvalidInputOverwritten"
+                                LostFocus="InputFinished" />
+          </StackPanel>
+          <StackPanel Grid.Column="4" Margin="8,18,5,5" VerticalAlignment="Top" Spacing="4">
             <CheckBox IsChecked="{CompiledBinding EnableAudio}"
                       Click="InputFinished">Audio</CheckBox>
             <CheckBox IsChecked="{CompiledBinding StereoAudioTexture}"
@@ -193,7 +204,8 @@
           <Button Margin="0,0,4,4"
                   IsEnabled="{CompiledBinding CanRemoveSelectedPass}"
                   Click="RemovePass_Click">Remove</Button>
-          <Button Margin="0,0,0,4" Click="Apply_Click">Apply</Button>
+          <Button Margin="0,0,4,4" Click="Apply_Click">Apply</Button>
+          <Button Margin="0,0,0,4" Click="ClearShaderCache_Click">Clear shader cache</Button>
         </WrapPanel>
 
         <!-- Row 4: Pass tabs -->
@@ -299,7 +311,8 @@
                                 VerticalScrollBarVisibility="Auto">
                     <TextBox FontFamily="monospace"
                              AcceptsReturn="True"
-                             Text="{CompiledBinding Source}" />
+                             TextWrapping="NoWrap"
+                             Text="{CompiledBinding Source, Mode=TwoWay}" />
                   </ScrollViewer>
                 </Grid>
 

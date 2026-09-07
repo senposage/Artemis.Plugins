@@ -34,6 +34,20 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
     private int _maxFps;
     public int MaxFps { get => _maxFps; set => RaiseAndSetIfChanged(ref _maxFps, value); }
 
+    private int _previewFps;
+    public int PreviewFps
+    {
+        get => _previewFps;
+        set
+        {
+            int previewFps = Math.Max(1, value);
+            if (_previewFps == previewFps) return;
+            RaiseAndSetIfChanged(ref _previewFps, previewFps);
+            if (!_isLoading)
+                UpdatePreviewInterval();
+        }
+    }
+
     private bool _enableAudio;
     public bool EnableAudio { get => _enableAudio; set => RaiseAndSetIfChanged(ref _enableAudio, value); }
 
@@ -163,7 +177,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         ShaderToyLayerBrush = layerBrush;
         _properties = layerBrush.Properties.Shader;
 
-        _updateTimer = new DispatcherTimer(TimeSpan.FromSeconds(1.0 / 30.0), DispatcherPriority.Normal,
+        _updateTimer = new DispatcherTimer(TimeSpan.FromSeconds(1.0 / 2.0), DispatcherPriority.Background,
             (_, _) => UpdatePreview());
 
         Passes.CollectionChanged += (_, _) =>
@@ -189,6 +203,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         Width        = _properties.Width;
         Height       = _properties.Height;
         MaxFps       = _properties.MaxFps;
+        PreviewFps   = _properties.PreviewFps;
         EnableAudio  = _properties.EnableAudio;
         StereoAudioTexture = _properties.StereoAudioTexture;
         CubicResize  = _properties.CubicResize;
@@ -218,6 +233,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         }
 
         _isLoading = false;
+        UpdatePreviewInterval();
     }
 
     public void Save()
@@ -226,6 +242,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         _properties.Width.SetCurrentValue(Width);
         _properties.Height.SetCurrentValue(Height);
         _properties.MaxFps.SetCurrentValue(MaxFps);
+        _properties.PreviewFps.SetCurrentValue(PreviewFps);
         _properties.EnableAudio.SetCurrentValue(EnableAudio);
         _properties.StereoAudioTexture.SetCurrentValue(StereoAudioTexture);
         _properties.CubicResize.SetCurrentValue(CubicResize);
@@ -289,8 +306,9 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         if (SelectedPreset == null || ShaderLibrary.Instance == null) return;
         var entry = ShaderLibrary.Instance.Entries.FirstOrDefault(e => e.Name == SelectedPreset);
         if (entry == null) return;
-        entry.Shader.Title = SelectedPreset;   // stamp name into def so it roundtrips through ShaderJson
-        ApplyDefinition(entry.Shader);
+        var def = CloneDefinition(entry.Shader);
+        def.Title = SelectedPreset;   // stamp name into def so it roundtrips through ShaderJson
+        ApplyDefinition(def);
     }
 
     public void SaveCurrentPreset()
@@ -311,6 +329,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
     public void NewPreset()
     {
         SetSelectedPresetWithoutLoading(null, updateSaveName: true);
+        ApplyDefinition(CreateBlankDefinition());
     }
 
     public void DeleteSelectedPreset()
@@ -320,6 +339,12 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         ShaderLibrary.Instance.Delete(deletedPreset);
         RefreshPresetNames();
         SetSelectedPresetWithoutLoading(null, updateSaveName: SavePresetName == deletedPreset);
+    }
+
+    public void ClearShaderCache()
+    {
+        ShaderToyLayerBrush.ClearShaderCache();
+        ShaderException = string.Empty;
     }
 
     // ------------------------------------------------------------------ helpers
@@ -371,6 +396,33 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
             .ToArray();
         return new ShaderDefinition { Title = "Custom", Passes = passes };
     }
+
+    private static ShaderDefinition CreateBlankDefinition() => new()
+    {
+        Title = "Custom",
+        Passes = [new ShaderPass { Type = PassType.Image, Source = string.Empty }]
+    };
+
+    private static ShaderDefinition CloneDefinition(ShaderDefinition source) => new()
+    {
+        ShadertoyId = source.ShadertoyId,
+        Title = source.Title,
+        Passes = source.Passes
+            .Select(pass => new ShaderPass
+            {
+                Type = pass.Type,
+                Source = pass.Source,
+                Inputs = pass.Inputs
+                    .Select(input => new PassInput
+                    {
+                        Channel = input.Channel,
+                        Type = input.Type,
+                        Source = input.Source
+                    })
+                    .ToArray()
+            })
+            .ToArray()
+    };
 
     private void RefreshPresetNames()
     {
@@ -424,6 +476,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
     {
         Load();
         RecreatePreviewSurface();
+        UpdatePreviewInterval();
         _updateTimer.Start();
 
         Disposable.Create(() =>
@@ -437,6 +490,9 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
     private unsafe void UpdatePreview()
     {
         if (PreviewImage == null || _previewBitmap == null) return;
+        string shaderError = ShaderToyLayerBrush.ShaderError ?? string.Empty;
+        if (ShaderException != shaderError)
+            ShaderException = shaderError;
         if (!ShaderToyLayerBrush.RenderPreview(_previewBitmap)) return;
 
         using ILockedFramebuffer fb = PreviewImage.Lock();
@@ -455,6 +511,12 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
                                            PixelFormat.Rgba8888, AlphaFormat.Opaque);
         _previewBitmap?.Dispose();
         _previewBitmap = new SKBitmap(w, h, SKColorType.Rgba8888, SKAlphaType.Opaque);
+    }
+
+    private void UpdatePreviewInterval()
+    {
+        int fps = Math.Clamp(PreviewFps, 1, 60);
+        _updateTimer.Interval = TimeSpan.FromSeconds(1.0 / fps);
     }
 
     private void OnSizeChanged(object? sender, PropertyChangedEventArgs e)

@@ -40,6 +40,12 @@ internal static unsafe class GlesNative
     public const uint GL_COMPILE_STATUS     = 0x8B81;
     public const uint GL_LINK_STATUS        = 0x8B82;
     public const uint GL_INFO_LOG_LENGTH    = 0x8B84;
+    public const uint GL_VENDOR             = 0x1F00;
+    public const uint GL_RENDERER           = 0x1F01;
+    public const uint GL_VERSION            = 0x1F02;
+    public const uint GL_PROGRAM_BINARY_LENGTH             = 0x8741;
+    public const uint GL_NUM_PROGRAM_BINARY_FORMATS        = 0x87FE;
+    public const uint GL_PROGRAM_BINARY_RETRIEVABLE_HINT   = 0x8257;
 
     // --- Framebuffer ---
     [DllImport(LIB)] public static extern void glGenFramebuffers(int n, uint* fbs);
@@ -80,6 +86,9 @@ internal static unsafe class GlesNative
     [DllImport(LIB)] public static extern void glLinkProgram(uint prog);
     [DllImport(LIB)] public static extern void glGetProgramiv(uint prog, uint pname, int* param);
     [DllImport(LIB)] public static extern void glGetProgramInfoLog(uint prog, int bufSize, int* length, byte* log);
+    [DllImport(LIB)] public static extern void glProgramParameteri(uint prog, uint pname, int value);
+    [DllImport(LIB)] public static extern void glProgramBinary(uint prog, uint binaryFormat, void* binary, int length);
+    [DllImport(LIB)] public static extern void glGetProgramBinary(uint prog, int bufSize, int* length, uint* binaryFormat, void* binary);
     [DllImport(LIB)] public static extern void glUseProgram(uint prog);
 
     // --- Uniforms ---
@@ -104,6 +113,8 @@ internal static unsafe class GlesNative
     [DllImport(LIB)] public static extern byte glUnmapBuffer(uint target);
     [DllImport(LIB)] public static extern void glFinish();
     [DllImport(LIB)] public static extern uint glGetError();
+    [DllImport(LIB)] public static extern void glGetIntegerv(uint pname, int* data);
+    [DllImport(LIB)] public static extern nint glGetString(uint name);
 
     // --- Helpers ---
     public static string GetShaderInfoLog(uint shader)
@@ -124,5 +135,11 @@ internal static unsafe class GlesNative
         var buf = new byte[len];
         fixed (byte* p = buf) glGetProgramInfoLog(prog, len, null, p);
         return Encoding.UTF8.GetString(buf, 0, len - 1);
+    }
+
+    public static string GetString(uint name)
+    {
+        nint value = glGetString(name);
+        return value == 0 ? string.Empty : Marshal.PtrToStringAnsi(value) ?? string.Empty;
     }
 }

@@ -1,6 +1,7 @@
 using System;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using Artemis.Core.LayerBrushes;
 using Artemis.Plugins.LayerBrushes.Shadertoy.LayerBrushes.PropertyGroups;
 using Artemis.Plugins.LayerBrushes.Shadertoy.Screens;
@@ -14,6 +15,10 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     private readonly Lock _lock = new();
     private GlesMultiPassRenderer? _renderer;
     private SKBitmap? _bitmap;
+    private string? _rendererSignature;
+    private string? _pendingRendererSignature;
+    private int _rendererBuildVersion;
+    private bool _disposed;
 
     /// <summary>Last shader compile/link error; null when the shader is valid.</summary>
     public string? ShaderError { get; private set; }
@@ -21,12 +26,13 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     public override void EnableLayerBrush()
     {
         ConfigurationDialog = new LayerBrushConfigurationDialog<ShaderPropertiesViewModel>(1300, 650);
-        lock (_lock) RecreateRenderer();
+        EnsureRenderer();
     }
 
     public override void DisableLayerBrush()
     {
-        lock (_lock) DestroyRenderer();
+        // Keep the compiled renderer alive so toggling a layer does not recompile
+        // large shaders. Dispose() still releases GL resources when the brush goes away.
     }
 
     /// <summary>Called by the UI after the user edits shader source, dimensions, or imports a new shader.</summary>
@@ -34,24 +40,16 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     {
         lock (_lock)
         {
-            DestroyRenderer();
-            ShaderError = null;
+            ShaderDefinition def = ResolveDefinition();
+            int w = Properties.Shader.Width.CurrentValue;
+            int h = Properties.Shader.Height.CurrentValue;
+            string signature = BuildRendererSignature(def, w, h);
 
-            var thread = ShaderToyLayerBrushProvider.RenderThread;
-            if (thread == null) return;
+            if ((_renderer != null && _bitmap != null && _rendererSignature == signature) ||
+                _pendingRendererSignature == signature)
+                return;
 
-            try
-            {
-                int w = Properties.Shader.Width.CurrentValue;
-                int h = Properties.Shader.Height.CurrentValue;
-
-                ShaderDefinition def = ResolveDefinition();
-                var r = new GlesMultiPassRenderer(thread, def, w, h);
-                if (!r.IsValid) { ShaderError = r.ErrorMessage; r.Dispose(); return; }
-                _renderer = r;
-                _bitmap   = new SKBitmap(w, h, SKColorType.Rgba8888, SKAlphaType.Opaque);
-            }
-            catch (Exception ex) { ShaderError = ex.Message; }
+            ScheduleRendererRebuild(def, w, h, signature);
         }
     }
 
@@ -81,7 +79,6 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     {
         lock (_lock)
         {
-            DestroyRenderer();
             ShaderError = null;
 
             // Persist for save/reload.
@@ -89,19 +86,9 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
             if (def.IsSinglePass)
                 Properties.Shader.Shader.SetCurrentValue(def.Passes[0].Source);
 
-            var thread = ShaderToyLayerBrushProvider.RenderThread;
-            if (thread == null) return;
-
-            try
-            {
-                int w = Properties.Shader.Width.CurrentValue;
-                int h = Properties.Shader.Height.CurrentValue;
-                var r = new GlesMultiPassRenderer(thread, def, w, h);
-                if (!r.IsValid) { ShaderError = r.ErrorMessage; r.Dispose(); return; }
-                _renderer = r;
-                _bitmap   = new SKBitmap(w, h, SKColorType.Rgba8888, SKAlphaType.Opaque);
-            }
-            catch (Exception ex) { ShaderError = ex.Message; }
+            int w = Properties.Shader.Width.CurrentValue;
+            int h = Properties.Shader.Height.CurrentValue;
+            ScheduleRendererRebuild(def, w, h, BuildRendererSignature(def, w, h));
         }
     }
 
@@ -134,11 +121,126 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
             _renderer?.SetMouse(x, y, pressed, clickX, clickY);
     }
 
+    public void ClearShaderCache()
+    {
+        lock (_lock)
+        {
+            _rendererBuildVersion++;
+            DestroyRenderer();
+            GlesProgramBinaryCache.Clear();
+            ShaderError = null;
+        }
+    }
+
     private void DestroyRenderer()
     {
         _renderer?.Dispose(); _renderer = null;
         _bitmap?.Dispose();   _bitmap   = null;
+        _rendererSignature = null;
     }
+
+    private void EnsureRenderer()
+    {
+        lock (_lock)
+        {
+            ShaderDefinition def = ResolveDefinition();
+            int w = Properties.Shader.Width.CurrentValue;
+            int h = Properties.Shader.Height.CurrentValue;
+            string signature = BuildRendererSignature(def, w, h);
+
+            if (_renderer != null && _bitmap != null && _rendererSignature == signature)
+                return;
+
+            if (_pendingRendererSignature == signature)
+                return;
+
+            ScheduleRendererRebuild(def, w, h, signature);
+        }
+    }
+
+    private void ScheduleRendererRebuild(ShaderDefinition def, int width, int height, string signature)
+    {
+        var thread = ShaderToyLayerBrushProvider.RenderThread;
+        if (thread == null || _disposed) return;
+
+        ShaderError = null;
+        _pendingRendererSignature = signature;
+        int version = ++_rendererBuildVersion;
+
+        ShaderLogger.Log($"LayerBrush: scheduling renderer build {version} ({width}x{height}, shader={signature.Length} chars signature)");
+
+        _ = Task.Run(() =>
+        {
+            GlesMultiPassRenderer? renderer = null;
+            SKBitmap? bitmap = null;
+            string? error = null;
+
+            try
+            {
+                renderer = new GlesMultiPassRenderer(thread, def, width, height);
+                if (!renderer.IsValid)
+                {
+                    error = renderer.ErrorMessage;
+                    renderer.Dispose();
+                    renderer = null;
+                }
+                else
+                {
+                    bitmap = new SKBitmap(Math.Max(1, width), Math.Max(1, height), SKColorType.Rgba8888, SKAlphaType.Opaque);
+                }
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                renderer?.Dispose();
+                renderer = null;
+            }
+
+            GlesMultiPassRenderer? oldRenderer = null;
+            SKBitmap? oldBitmap = null;
+            bool stale;
+
+            lock (_lock)
+            {
+                stale = _disposed || version != _rendererBuildVersion || _pendingRendererSignature != signature;
+                if (!stale)
+                {
+                    _pendingRendererSignature = null;
+                    ShaderError = error;
+
+                    if (renderer != null && bitmap != null)
+                    {
+                        oldRenderer = _renderer;
+                        oldBitmap = _bitmap;
+                        _renderer = renderer;
+                        _bitmap = bitmap;
+                        _rendererSignature = signature;
+                        renderer = null;
+                        bitmap = null;
+                    }
+                    else if (_renderer == null)
+                    {
+                        _rendererSignature = null;
+                    }
+                }
+            }
+
+            if (stale)
+                ShaderLogger.Log($"LayerBrush: discarded stale renderer build {version}");
+            else if (error != null)
+                ShaderLogger.Log($"LayerBrush: renderer build {version} failed: {error}");
+            else
+                ShaderLogger.Log($"LayerBrush: renderer build {version} complete");
+
+            renderer?.Dispose();
+            bitmap?.Dispose();
+            oldRenderer?.Dispose();
+            oldBitmap?.Dispose();
+        });
+    }
+
+    private static string BuildRendererSignature(ShaderDefinition def, int width, int height) =>
+        $"{Math.Max(1, width)}x{Math.Max(1, height)}:{JsonSerializer.Serialize(def)}";
 
     public override void Update(double deltaTime) { }
 
@@ -173,6 +275,11 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        lock (_lock) DestroyRenderer();
+        lock (_lock)
+        {
+            _disposed = true;
+            _rendererBuildVersion++;
+            DestroyRenderer();
+        }
     }
 }

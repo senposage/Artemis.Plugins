@@ -82,6 +82,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     private double _lastRenderTime = double.NegativeInfinity;
     private volatile int _maxFps = 10;
     private byte[]? _pixels;
+    private readonly Dictionary<nint, int> _copiedFrames = [];
 
     // Mouse state — Shadertoy iMouse convention.
     // xy = current/last position (shader pixels, Y=0 at bottom).
@@ -165,29 +166,8 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
                 ? pass.Source
                 : commonSrc + "\n\n" + pass.Source;
             string converted = ShaderConverter.ConvertToGles(src);
-            uint frag = CompileShader(GL_FRAGMENT_SHADER, converted);
-            if (frag == 0)
-            {
-                // ErrorMessage already set by CompileShader
-                glDeleteShader(_vertShader); _vertShader = 0;
-                return;
-            }
-
-            // Link program
-            uint prog = glCreateProgram();
-            glAttachShader(prog, _vertShader);
-            glAttachShader(prog, frag);
-            glLinkProgram(prog);
-            glDeleteShader(frag);
-
-            int linked; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
-            if (linked == 0)
-            {
-                ErrorMessage = $"Pass {pass.Type} link error: {GetProgramInfoLog(prog)}";
-                ShaderLogger.Log($"MultiPass.Setup: {ErrorMessage}");
-                glDeleteProgram(prog);
-                return;
-            }
+            uint prog = CreateProgram(pass.Type, converted);
+            if (prog == 0) return;
             state.Program = prog;
 
             // Query uniforms
@@ -484,9 +464,16 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
                 _lastRenderTime = now;
             }
 
+            nint dstKey = bitmap.GetPixels();
+            if (_copiedFrames.TryGetValue(dstKey, out int copiedFrame) && copiedFrame == _frame)
+                return;
+
+            if (bitmap.Width != Width || bitmap.Height != Height)
+                return;
+
             // Y-flip: GL bottom-left → Skia top-left
             int stride  = Width * 4;
-            var dstPtr  = (byte*)bitmap.GetPixels();
+            var dstPtr  = (byte*)dstKey;
             fixed (byte* src = _pixels)
             {
                 for (int y = 0; y < Height; y++)
@@ -495,6 +482,10 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
                         .CopyTo(new Span<byte>(dstPtr + y * stride, stride));
                 }
             }
+
+            if (_copiedFrames.Count > 8)
+                _copiedFrames.Clear();
+            _copiedFrames[dstKey] = _frame;
         }
     }
 
@@ -579,6 +570,44 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
         ShaderLogger.Log($"CompileShader failed (type={type:X}): {ErrorMessage}");
         glDeleteShader(s);
         return 0;
+    }
+
+    private uint CreateProgram(PassType passType, string fragmentSource)
+    {
+        var sw = Stopwatch.StartNew();
+        string cacheKey = GlesProgramBinaryCache.BuildKey(passType.ToString(), VERT_SRC, fragmentSource);
+        if (GlesProgramBinaryCache.TryLoadProgram(cacheKey, out uint cachedProgram))
+        {
+            ShaderLogger.Log($"MultiPass.Setup: pass {passType} loaded cached program in {sw.ElapsedMilliseconds} ms");
+            return cachedProgram;
+        }
+
+        uint frag = CompileShader(GL_FRAGMENT_SHADER, fragmentSource);
+        if (frag == 0)
+        {
+            glDeleteShader(_vertShader); _vertShader = 0;
+            return 0;
+        }
+
+        uint prog = glCreateProgram();
+        glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, 1);
+        glAttachShader(prog, _vertShader);
+        glAttachShader(prog, frag);
+        glLinkProgram(prog);
+        glDeleteShader(frag);
+
+        int linked; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+        if (linked == 0)
+        {
+            ErrorMessage = $"Pass {passType} link error: {GetProgramInfoLog(prog)}";
+            ShaderLogger.Log($"MultiPass.Setup: {ErrorMessage}");
+            glDeleteProgram(prog);
+            return 0;
+        }
+
+        ShaderLogger.Log($"MultiPass.Setup: pass {passType} compiled+linked in {sw.ElapsedMilliseconds} ms");
+        GlesProgramBinaryCache.SaveProgram(cacheKey, prog);
+        return prog;
     }
 
     private static void CreateFboTex(int w, int h, out uint fbo, out uint tex)

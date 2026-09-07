@@ -26,6 +26,7 @@ public partial class ShaderPropertiesView : ReactiveUserControl<ShaderProperties
     private void NewPreset_Click(object? sender, RoutedEventArgs e) => ViewModel?.NewPreset();
     private void DeletePreset_Click(object? sender, RoutedEventArgs e) => ViewModel?.DeleteSelectedPreset();
     private void RemovePass_Click(object? sender, RoutedEventArgs e) => ViewModel?.RemoveSelectedPass();
+    private void ClearShaderCache_Click(object? sender, RoutedEventArgs e) => ViewModel?.ClearShaderCache();
 
     // ---- preview mouse input ----
 
