@@ -38,6 +38,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         private const int DdcUnavailableLastResortOffThreshold = 6;
         private const int NotPresentOffThresholdDuringTopologyChurn = 2;
         private static readonly TimeSpan CleanDdcStateFreshness = TimeSpan.FromSeconds(15);
+        private static readonly TimeSpan CaptureDiagnosticsInterval = TimeSpan.FromMinutes(1);
         private static long s_displayTopologyUnstableUntilUnixMs;
         private static long s_windowsDisplayOffGeneration;
         private static long s_windowsDisplayOnConfirmedGeneration;
@@ -772,7 +773,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
             AmbilightWindowsDiagnostics.Write(Logger,
                 $"capture loop skip for {Display.DeviceName}: {reason} (suspended={_suspended} displayOff={_displayOff} windowsDisplayOff={IsWindowsDisplayOffLatchedForThisInstance()} ddcEverWorked={_ddcEverWorked})");
-            _nextBlackSkipLog = now + TimeSpan.FromSeconds(5);
+            _nextBlackSkipLog = now + CaptureDiagnosticsInterval;
         }
 
         private void LogCaptureFalseIfNeeded()
@@ -786,7 +787,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
 
             AmbilightWindowsDiagnostics.Write(Logger,
                 $"capture returned no frame for {Display.DeviceName}; backend={CaptureBackendDetails}; suspended={_suspended}; displayOff={_displayOff}; windowsDisplayOff={IsWindowsDisplayOffLatchedForThisInstance()}; zones={_zoneCount}");
-            _nextCaptureFalseLog = now + TimeSpan.FromSeconds(5);
+            _nextCaptureFalseLog = now + CaptureDiagnosticsInterval;
         }
 
         public void Restart()

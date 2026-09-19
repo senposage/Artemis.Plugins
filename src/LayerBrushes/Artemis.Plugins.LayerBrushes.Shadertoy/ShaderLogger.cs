@@ -5,9 +5,10 @@ using System.Threading;
 
 namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 
-/// <summary>Lightweight file logger for diagnosing EGL/GLES issues at runtime.</summary>
+/// <summary>Writes the bounded release resource ledger.</summary>
 internal static class ShaderLogger
 {
+    private const long MaxLogBytes = 16L * 1024 * 1024;
     private static string? _logPath;
     private static readonly Lock _lock = new();
 
@@ -15,20 +16,31 @@ internal static class ShaderLogger
     public static void Init(string pluginDir)
     {
         _logPath = Path.Combine(pluginDir, "shader_debug.log");
-        try
-        {
-            File.WriteAllText(_logPath,
-                $"=== EGL Shaderbrush debug log — {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==={Environment.NewLine}");
-        }
-        catch { _logPath = null; }
     }
 
     public static void Log(string message)
     {
-        if (_logPath == null) return;
+        // Routine EGL, shader, frame, and capture diagnostics are intentionally
+        // not persisted by release builds.
+    }
+
+    public static void RuntimeLedger(string message)
+    {
+        if (_logPath == null)
+            return;
+
         lock (_lock)
         {
-            try { File.AppendAllText(_logPath, $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}"); }
+            try
+            {
+                if (File.Exists(_logPath) && new FileInfo(_logPath).Length >= MaxLogBytes)
+                {
+                    File.WriteAllText(_logPath,
+                        $"=== ShaderToy diagnostics rotated {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz} ==={Environment.NewLine}");
+                }
+
+                File.AppendAllText(_logPath, $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}");
+            }
             catch { }
         }
     }
@@ -94,7 +106,7 @@ internal static class ShaderRuntimeDiagnostics
 
         using Process process = Process.GetCurrentProcess();
         long managed = GC.GetTotalMemory(forceFullCollection: false);
-        ShaderLogger.Log(
+        ShaderLogger.RuntimeLedger(
             $"RuntimeLedger: managed={managed:N0} private={process.PrivateMemorySize64:N0} workingSet={process.WorkingSet64:N0} handles={process.HandleCount} " +
             $"glRenderers={Interlocked.Read(ref _liveRendererCount)} create/dispose={Interlocked.Read(ref _rendererCreateCount)}/{Interlocked.Read(ref _rendererDisposeCount)} " +
             $"trackedGlBytes={Interlocked.Read(ref _liveGlTextureBytes):N0} peakTrackedGlBytes={Interlocked.Read(ref _peakGlTextureBytes):N0} " +

@@ -8,7 +8,9 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight;
 
 internal static class AmbilightWindowsDiagnostics
 {
+    private const long MaxLogBytes = 16L * 1024 * 1024;
     private const long RuntimeReportIntervalMs = 60_000;
+    private static readonly Lock WriteLock = new();
     private static long _nextRuntimeReportTick;
     private static long _liveWgcSessionCount;
     private static long _wgcSessionCreateCount;
@@ -30,22 +32,42 @@ internal static class AmbilightWindowsDiagnostics
     public static void Write(ILogger logger, string message)
     {
         logger.Debug("[Ambilight/Windows] {Message}", message);
-        Write(message);
     }
 
+    /// <summary>
+    /// The release build persists only the low-rate resource ledger. Capture-event
+    /// detail remains available through the normal Serilog debug sink when enabled.
+    /// </summary>
     public static void Write(string message)
     {
-        try
+        // Intentionally no-op in release builds. This method remains to avoid making
+        // capture diagnostics a source of disk, cache, or I/O pressure.
+    }
+
+    private static void AppendRuntimeLedger(string message)
+    {
+        lock (WriteLock)
         {
-            string line = $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} {message}";
-            string? directory = Path.GetDirectoryName(LogPath);
-            if (!string.IsNullOrWhiteSpace(directory))
-                Directory.CreateDirectory(directory);
-            File.AppendAllText(LogPath, line + Environment.NewLine);
-        }
-        catch
-        {
-            // Diagnostics must never break plugin startup.
+            try
+            {
+                string path = LogPath;
+                string? directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrWhiteSpace(directory))
+                    Directory.CreateDirectory(directory);
+
+                if (File.Exists(path) && new FileInfo(path).Length >= MaxLogBytes)
+                {
+                    File.WriteAllText(path,
+                        $"=== Ambilight diagnostics rotated {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz} ==={Environment.NewLine}");
+                }
+
+                string line = $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} {message}";
+                File.AppendAllText(path, line + Environment.NewLine);
+            }
+            catch
+            {
+                // Diagnostics must never break plugin startup.
+            }
         }
     }
 
@@ -82,7 +104,7 @@ internal static class AmbilightWindowsDiagnostics
             return;
 
         using Process process = Process.GetCurrentProcess();
-        Write(
+        AppendRuntimeLedger(
             $"WGC RuntimeLedger: managed={GC.GetTotalMemory(forceFullCollection: false):N0} private={process.PrivateMemorySize64:N0} workingSet={process.WorkingSet64:N0} handles={process.HandleCount} " +
             $"sessions={Interlocked.Read(ref _liveWgcSessionCount)} create/dispose={Interlocked.Read(ref _wgcSessionCreateCount)}/{Interlocked.Read(ref _wgcSessionDisposeCount)} " +
             $"trackedWgcBytes={Interlocked.Read(ref _trackedWgcBytes):N0} peakTrackedWgcBytes={Interlocked.Read(ref _peakTrackedWgcBytes):N0}");
