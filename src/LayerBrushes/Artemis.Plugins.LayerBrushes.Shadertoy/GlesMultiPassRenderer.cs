@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using SkiaSharp;
 using static Artemis.Plugins.LayerBrushes.Shadertoy.GlesNative;
@@ -83,6 +84,8 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     private volatile int _maxFps = 10;
     private byte[]? _pixels;
     private readonly Dictionary<nint, int> _copiedFrames = [];
+    private long _trackedGlBytes;
+    private bool _resourcesTracked;
 
     // Mouse state — Shadertoy iMouse convention.
     // xy = current/last position (shader pixels, Y=0 at bottom).
@@ -94,6 +97,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     public int    Width  { get; }
     public int    Height { get; }
     public bool   IsValid    => _passes.Length > 0 && ErrorMessage == null;
+    public bool   HasAudioInput => _hasAudioInput;
     public string? ErrorMessage { get; private set; }
 
     public int MaxFps
@@ -219,10 +223,6 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
             foreach (var inp in ps.Inputs)
                 if (inp.Type == ChannelInputType.Audio) { _hasAudioInput = true; break; }
 
-        // Start audio capture lazily — never during plugin Enable() so we don't
-        // race with Artemis.Plugins.Audio's WASAPI/DryIoc initialization.
-        if (_hasAudioInput) AudioCapture.Start();
-
         // Create audio texture (512×2 RGBA8) if needed
         if (_hasAudioInput)
         {
@@ -238,7 +238,15 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
             glBindTexture(GL_TEXTURE_2D, 0);
         }
 
-        ShaderLogger.Log($"MultiPass.Setup: complete, {_passes.Length} passes, audio={_hasAudioInput}, IsValid={IsValid}");
+        long coreTextureCount = 4L + (_hasAudioInput ? 1L : 0L) + 2L * _passes.Count(p => p.Type != PassType.Image);
+        long coreTextureBytes = 4L * Width * Height * (1L + 2L * _passes.Count(p => p.Type != PassType.Image));
+        coreTextureBytes += 256L * 256L * 4L * 2L; // Noise2D + Noise3D
+        coreTextureBytes += 256L * 3L * 4L;        // Keyboard stub
+        coreTextureBytes += 4L;                     // Black stub
+        if (_hasAudioInput) coreTextureBytes += 512L * 2L * 4L;
+        TrackGlResources(coreTextureBytes);
+
+        ShaderLogger.Log($"MultiPass.Setup: complete, {_passes.Length} passes, audio={_hasAudioInput}, trackedTextures={coreTextureCount}, trackedBytes={coreTextureBytes:N0}, IsValid={IsValid}");
     }
 
     // ------------------------------------------------------------------
@@ -251,6 +259,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
         _lastTime = t;
         _frame++;
         var now = DateTime.Now;
+        LogRuntimeStatsIfDue();
 
         // ---- Upload audio texture ----
         if (_hasAudioInput && _audioTex != 0 && EnableAudio && AudioCapture.IsRunning)
@@ -415,6 +424,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
             if (needsDispose) src.Dispose();
 
             _imageTextures[path] = t;
+            TrackGlResources(4L * src.Width * src.Height);
             ShaderLogger.Log($"ImageTex: loaded {path} → tex {t} ({bmp.Width}×{bmp.Height})");
             return t;
         }
@@ -535,7 +545,27 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
             if (t != 0) glDeleteTextures(1, &t);
         }
         _imageTextures.Clear();
+
+        if (_resourcesTracked)
+        {
+            ShaderRuntimeDiagnostics.RendererDisposed(_trackedGlBytes);
+            _trackedGlBytes = 0;
+            _resourcesTracked = false;
+        }
     }
+
+    private void TrackGlResources(long bytes)
+    {
+        if (bytes <= 0) return;
+        _trackedGlBytes += bytes;
+        ShaderRuntimeDiagnostics.AddGlResources(bytes);
+        if (_resourcesTracked) return;
+
+        _resourcesTracked = true;
+        ShaderRuntimeDiagnostics.RendererCreated();
+    }
+
+    private static void LogRuntimeStatsIfDue() => ShaderRuntimeDiagnostics.ReportIfDue();
 
     // ------------------------------------------------------------------
     // GL helpers

@@ -108,7 +108,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
             AudioCapture.MinFrequency   = Properties.Shader.AudioMinFreq.CurrentValue;
             AudioCapture.MaxFrequency   = Properties.Shader.AudioMaxFreq.CurrentValue;
             AudioCapture.FrequencyScale = (SpectrumMode)Properties.Shader.AudioSpectrumMode.CurrentValue;
-            AudioCapture.EnsureActive(_renderer.EnableAudio);
+            AudioCapture.EnsureActive(_renderer.EnableAudio && _renderer.HasAudioInput);
             _renderer.RenderToBuffer(bitmap);
             return true;
         }
@@ -259,7 +259,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
             AudioCapture.MinFrequency   = Properties.Shader.AudioMinFreq.CurrentValue;
             AudioCapture.MaxFrequency   = Properties.Shader.AudioMaxFreq.CurrentValue;
             AudioCapture.FrequencyScale = (SpectrumMode)Properties.Shader.AudioSpectrumMode.CurrentValue;
-            AudioCapture.EnsureActive(_renderer.EnableAudio);
+            AudioCapture.EnsureActive(_renderer.EnableAudio && _renderer.HasAudioInput);
             _renderer.RenderToBuffer(_bitmap);
             using var drawPaint = paint.Clone();
             if (Properties.Shader.CubicResize.CurrentValue)

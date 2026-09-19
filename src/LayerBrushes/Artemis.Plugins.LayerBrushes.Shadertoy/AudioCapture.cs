@@ -18,7 +18,6 @@ internal static class AudioCapture
     private const int OUT_W  = 512;        // output texture width
     private const int RING   = FFT_N * 8;  // ring buffer length in mono float samples
     private const long SILENCE_TIMEOUT_MS = 250;
-    private const long RESTART_TIMEOUT_MS = 2000;
     /// <summary>dB floor for FFT normalisation.  Bins below this level map to 0.</summary>
     public static float DbFloor = -50f;
 
@@ -81,10 +80,14 @@ internal static class AudioCapture
     private static readonly Lock       _lock     = new();
     private static readonly Lock       _lifecycleLock = new();
     private static long _lastDataTick = Environment.TickCount64;
-    private static long _lastRestartTick = long.MinValue;
     private static bool _startPending;
+    private static long _lifecycleGeneration;
+    private static long _startCount;
+    private static long _stopCount;
 
     public static bool IsRunning { get; private set; }
+    public static long StartCount => Interlocked.Read(ref _startCount);
+    public static long StopCount => Interlocked.Read(ref _stopCount);
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -92,10 +95,12 @@ internal static class AudioCapture
     {
         var requestedSource = InputSource;
         var requestedDeviceId = SelectedDeviceId;
+        long generation;
         lock (_lifecycleLock)
         {
             if (IsRunning || _startPending) return;
             _startPending = true;
+            generation = ++_lifecycleGeneration;
         }
 
         ShaderLogger.Log($"AudioCapture.Start: requested source={requestedSource}, device='{requestedDeviceId}', floor={DbFloor:F1}dB, gate={NoiseGateAmplitude():F6}");
@@ -105,31 +110,53 @@ internal static class AudioCapture
             try
             {
                 var (cap, backend, sampleRate) = CreateCaptureBackend(requestedSource, requestedDeviceId);
+                bool stale;
                 lock (_lifecycleLock)
                 {
-                    _capture = cap;
-                    _captureBackend = backend;
-                    _activeInputSource = requestedSource;
-                    _activeDeviceId = requestedDeviceId;
-                    SampleRate = sampleRate;
-                    IsRunning = true;
-                    _lastDataTick = Environment.TickCount64;
+                    stale = generation != _lifecycleGeneration || !_startPending;
+                    if (!stale)
+                    {
+                        _capture = cap;
+                        _captureBackend = backend;
+                        _activeInputSource = requestedSource;
+                        _activeDeviceId = requestedDeviceId;
+                        SampleRate = sampleRate;
+                        IsRunning = true;
+                        _lastDataTick = Environment.TickCount64;
+                        Interlocked.Increment(ref _startCount);
+                    }
+                }
+
+                if (stale)
+                {
+                    cap.Dispose();
+                    ShaderLogger.Log("AudioCapture: discarded capture that completed after Stop");
+                    return;
                 }
                 ShaderLogger.Log($"AudioCapture: started {backend} capture for source={requestedSource}, sampleRate={sampleRate}");
             }
             catch (Exception ex)
             {
                 ShaderLogger.Log($"AudioCapture: failed to start source={requestedSource}, device='{requestedDeviceId}': {ex}");
-                _capture?.Dispose();
-                _capture = null;
-                _captureBackend = "none";
-                _activeInputSource = requestedSource;
-                _activeDeviceId = requestedDeviceId;
+                lock (_lifecycleLock)
+                {
+                    if (generation == _lifecycleGeneration)
+                    {
+                        _capture?.Dispose();
+                        _capture = null;
+                        _captureBackend = "none";
+                        _activeInputSource = requestedSource;
+                        _activeDeviceId = requestedDeviceId;
+                    }
+                }
             }
             finally
             {
                 lock (_lifecycleLock)
-                    _startPending = false;
+                {
+                    if (generation == _lifecycleGeneration)
+                        _startPending = false;
+                }
             }
         })
         {
@@ -154,11 +181,13 @@ internal static class AudioCapture
             _activeDeviceId = SelectedDeviceId;
             IsRunning = false;
             _startPending = false;
+            _lifecycleGeneration++;
         }
 
         try { capture?.Dispose(); }
         catch { }
         ResetSnapshotToSilence();
+        Interlocked.Increment(ref _stopCount);
         ShaderLogger.Log($"AudioCapture: {backend} stopped");
     }
 
@@ -198,17 +227,9 @@ internal static class AudioCapture
             return;
         }
 
-        if (staleFor < RESTART_TIMEOUT_MS)
-            return;
-
-        long lastRestart = Interlocked.Read(ref _lastRestartTick);
-        if (now - lastRestart < RESTART_TIMEOUT_MS)
-            return;
-
-        Interlocked.Exchange(ref _lastRestartTick, now);
-        ShaderLogger.Log($"AudioCapture: no frames for {staleFor} ms, restarting {_captureBackend} capture");
-        Stop();
-        Start();
+        // Silence is normal for WASAPI loopback: many drivers stop producing packets
+        // when nothing is playing. A missing packet is not a device failure, and
+        // repeatedly recreating the COM capture graph leaked native driver resources.
     }
 
     private static (IDisposable Capture, string Backend, int SampleRate) CreateCaptureBackend(AudioInputSource source, string deviceId)

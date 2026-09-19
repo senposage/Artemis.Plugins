@@ -104,6 +104,9 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     private ID3D11Texture2D? _stagingTexture;
     private int _stagingWidth;
     private int _stagingHeight;
+    private long _trackedSessionBytes;
+    private long _trackedMipBytes;
+    private long _trackedStagingBytes;
 
     public Display Display { get; }
     public event EventHandler<ScreenCaptureUpdatedEventArgs>? Updated;
@@ -226,6 +229,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
                 DirectXPixelFormat.B8G8R8A8UIntNormalized,
                 2, // double-buffer: 1 held + 1 pre-delivered = 0 free → DWM stops capture copies between grabs
                 _captureItem!.Size);
+            SetTrackedSessionBytes(2L * _captureItem.Size.Width * _captureItem.Size.Height * 4L);
             _framePool.FrameArrived += OnFrameArrived;
             AmbilightWindowsDiagnostics.Write(Logger,
                 $"WGC frame pool created for {Display.DeviceName} size={_captureItem.Size.Width}x{_captureItem.Size.Height}");
@@ -367,6 +371,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
             _session = null;
             _framePool?.Dispose();
             _framePool = null;
+            SetTrackedSessionBytes(0);
         }
     }
 
@@ -384,6 +389,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         _session = null;
         _framePool?.Dispose();
         _framePool = null;
+        SetTrackedSessionBytes(0);
     }
 
     #endregion
@@ -397,6 +403,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
 
         _mipSRV?.Dispose();
         _mipTexture?.Dispose();
+        SetTrackedMipBytes(0);
 
         _mipTexture = _device.CreateTexture2D(new Texture2DDescription
         {
@@ -413,6 +420,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         _mipSRV = _device.CreateShaderResourceView(_mipTexture);
         _mipTexWidth = width;
         _mipTexHeight = height;
+        SetTrackedMipBytes(CalculateMipChainBytes(width, height));
     }
 
     private void EnsureStagingTexture(int width, int height)
@@ -421,6 +429,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
             return;
 
         _stagingTexture?.Dispose();
+        SetTrackedStagingBytes(0);
         _stagingTexture = _device.CreateTexture2D(new Texture2DDescription
         {
             Width = width,
@@ -434,6 +443,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         });
         _stagingWidth = width;
         _stagingHeight = height;
+        SetTrackedStagingBytes(4L * width * height);
     }
 
     private void DisposeGpuResources()
@@ -444,6 +454,8 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         _mipTexture = null;
         _stagingTexture?.Dispose();
         _stagingTexture = null;
+        SetTrackedMipBytes(0);
+        SetTrackedStagingBytes(0);
     }
 
     #endregion
@@ -453,6 +465,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     public unsafe bool CaptureScreen()
     {
         if (_disposed) return false;
+        AmbilightWindowsDiagnostics.ReportWgcRuntime();
 
         if (_device.DeviceRemovedReason.Failure)
             throw new InvalidOperationException("D3D11 device lost: " + _device.DeviceRemovedReason);
@@ -636,6 +649,41 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
             _captureItem = null;
             DisposeGpuResources();
         }
+    }
+
+    private void SetTrackedSessionBytes(long bytes)
+    {
+        if (_trackedSessionBytes == bytes) return;
+        if (_trackedSessionBytes == 0)
+            AmbilightWindowsDiagnostics.WgcSessionCreated(bytes);
+        else if (bytes == 0)
+            AmbilightWindowsDiagnostics.WgcSessionDisposed(_trackedSessionBytes);
+        else
+            AmbilightWindowsDiagnostics.AdjustTrackedWgcBytes(bytes - _trackedSessionBytes);
+        _trackedSessionBytes = bytes;
+    }
+
+    private void SetTrackedMipBytes(long bytes) => SetTrackedResourceBytes(ref _trackedMipBytes, bytes);
+
+    private void SetTrackedStagingBytes(long bytes) => SetTrackedResourceBytes(ref _trackedStagingBytes, bytes);
+
+    private static long CalculateMipChainBytes(int width, int height)
+    {
+        long bytes = 0;
+        while (width > 0 && height > 0)
+        {
+            bytes += 4L * width * height;
+            width >>= 1;
+            height >>= 1;
+        }
+        return bytes;
+    }
+
+    private static void SetTrackedResourceBytes(ref long current, long bytes)
+    {
+        if (current == bytes) return;
+        AmbilightWindowsDiagnostics.AdjustTrackedWgcBytes(bytes - current);
+        current = bytes;
     }
 
     #endregion

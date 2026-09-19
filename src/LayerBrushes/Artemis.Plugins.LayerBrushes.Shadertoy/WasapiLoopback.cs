@@ -34,6 +34,7 @@ internal sealed unsafe class WasapiLoopback : IDisposable
     private int _blockAlign;
     private readonly float[] _channelVolumes = new float[32];
     private long _lastVolumeRefreshTick;
+    private bool _captureResourcesTracked;
 
     private const uint LOOPBACK = 0x00020000u;
     private const uint DEVICE_STATE_ACTIVE = 1u;
@@ -282,6 +283,8 @@ internal sealed unsafe class WasapiLoopback : IDisposable
 
             hr = _audioClient.Start();
             if (hr < 0) throw new COMException("IAudioClient.Start", hr);
+            _captureResourcesTracked = true;
+            ShaderRuntimeDiagnostics.WasapiGraphOpened();
         }
         finally
         {
@@ -297,6 +300,11 @@ internal sealed unsafe class WasapiLoopback : IDisposable
         if (_captureClient != null) { Marshal.ReleaseComObject(_captureClient); _captureClient = null; }
         if (_audioClient != null) { Marshal.ReleaseComObject(_audioClient); _audioClient = null; }
         if (_endpointVolume != null) { Marshal.ReleaseComObject(_endpointVolume); _endpointVolume = null; }
+        if (_captureResourcesTracked)
+        {
+            _captureResourcesTracked = false;
+            ShaderRuntimeDiagnostics.WasapiGraphClosed();
+        }
     }
 
     private void DeliverSilence(uint frames)
