@@ -4,10 +4,26 @@
     <TargetFramework>net10.0</TargetFramework>
     <Platforms>x64</Platforms>
     <EnableDynamicLoading>true</EnableDynamicLoading>
+    <UseArtemisNugetPackages>false</UseArtemisNugetPackages>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="RGB.NET.Devices.OpenRGB" Version="3.1.0" />
+    <PackageReference Remove="ArtemisRGB.UI.Shared" />
+    <!-- Compile against the patched core API without bundling Artemis.Core into the plugin. -->
+    <Reference Include="Artemis.Core">
+      <HintPath>..\..\..\..\Artemis.Upstream\src\Artemis.Core\bin\net10.0\Artemis.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Artemis.Storage">
+      <HintPath>..\..\..\..\Artemis.Upstream\src\Artemis.Storage\bin\Release\net10.0\Artemis.Storage.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Artemis.UI.Shared">
+      <HintPath>..\..\..\..\Artemis.Upstream\src\Artemis.UI.Shared\bin\net10.0\Artemis.UI.Shared.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <ProjectReference Include="OpenRGB.NET\OpenRGB.NET.csproj" />
+    <ProjectReference Include="RGB.NET.Devices.OpenRGB\RGB.NET.Devices.OpenRGB.csproj" />
     <PackageReference Include="McMaster.NETCore.Plugins" />
     <PackageReference Include="Serilog" />
     <PackageReference Include="System.Text.Json" />
@@ -23,6 +39,15 @@
   <ItemGroup>
     <Content Include="Layouts\**" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="OpenRGB.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="OpenRGB.NET\**\*.cs" />
+    <Compile Remove="OpenRGB.NET.Tests\**\*.cs" />
+    <Compile Remove="RGB.NET.Devices.OpenRGB\**\*.cs" />
+    <None Remove="OpenRGB.NET\**\*" />
+    <None Remove="OpenRGB.NET.Tests\**\*" />
+    <None Remove="RGB.NET.Devices.OpenRGB\**\*" />
   </ItemGroup>
 
   <ItemGroup>

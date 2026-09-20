@@ -29,12 +29,15 @@ namespace Artemis.Plugins.Devices.OpenRGB.ViewModels
 
             Definitions = new ObservableCollection<OpenRGBServerDefinition>(_definitions.Value);
             ForceAddAllDevices = _forceAddAllDevicesSetting.Value;
+            SdkStatus = plugin.GetFeature<OpenRGBDeviceProvider>()?.SdkStatus ?? "SDK status: plugin is disabled";
             DeleteDefinition = ReactiveCommand.Create<OpenRGBServerDefinition>(ExecuteDeleteDefinition);
         }
 
         public ReactiveCommand<OpenRGBServerDefinition,Unit> DeleteDefinition { get; }
 
         public ObservableCollection<OpenRGBServerDefinition> Definitions { get; }
+
+        public string SdkStatus { get; }
 
         public bool ForceAddAllDevices
         {

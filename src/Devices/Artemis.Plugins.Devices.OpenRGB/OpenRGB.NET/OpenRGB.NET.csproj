@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <LangVersion>latest</LangVersion>
+        <Nullable>enable</Nullable>
+        <Version>3.1.1</Version>
+        <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <Authors>Diogo Trindade</Authors>
+        <Company>Diogo Trindade</Company>
+        <Description>Vendored OpenRGB SDK client with protocol v6 support for Artemis</Description>
+        <Copyright>Copyright © 2020 Diogo Trindade</Copyright>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageProjectUrl>https://github.com/diogotr7/OpenRGB.NET</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/diogotr7/OpenRGB.NET</RepositoryUrl>
+        <PackageTags>openrgb, rgb, sdk, client</PackageTags>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="$(AssemblyName).Tests" />
+    </ItemGroup>
+
+</Project>

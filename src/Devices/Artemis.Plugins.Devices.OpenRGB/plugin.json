@@ -1,14 +1,14 @@
 {
   "Guid": "821cf18b-2bbe-4877-b68f-d6a2a8bddc28",
-  "MinimumVersion": "1.2025.1222.3",
-  "Name": "OpenRGB Devices",
-  "Author": "DrMeteor",
+  "MinimumVersion": "1.2026.0920.0232",
+  "Name": "OpenRGB Devices v6",
+  "Author": "DrMeteor,Senposage",
   "Website": "https://artemis-rgb.com/",
   "Repository": "https://github.com/Artemis-RGB/Artemis.Plugins",
   "HelpPage": "https://wiki.artemis-rgb.com/en/guides/user/devices/open-rgb",
   "Icon": "OpenRGB.png",
-  "Description": "OpenRGB device support",
-  "Version": "1.0.0.0",
+  "Description": "OpenRGB device support (protocol v6)",
+  "Version": "2026.0920.0330",
   "Main": "Artemis.Plugins.Devices.OpenRGB.dll",
   "AutoEnableFeatures": false
 }
