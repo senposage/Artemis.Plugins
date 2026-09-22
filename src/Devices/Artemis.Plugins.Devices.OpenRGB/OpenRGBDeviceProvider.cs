@@ -22,6 +22,7 @@ public class OpenRGBDeviceProvider : DeviceProvider
     private readonly IDeviceService _deviceService;
     private readonly PluginSetting<List<OpenRGBServerDefinition>> _deviceDefinitionsSettings;
     private readonly PluginSetting<bool> _forceAddAllDevicesSetting;
+    private readonly Timer _refreshTimer;
     private readonly Timer _reconnectTimer;
     private readonly SemaphoreSlim _reconcileLock = new(1, 1);
     private readonly HashSet<OpenRGBServerDefinition> _detectingServers = [];
@@ -41,6 +42,8 @@ public class OpenRGBDeviceProvider : DeviceProvider
 
         CreateMissingLedsSupported = false;
         RemoveExcessiveLedsSupported = true;
+        _refreshTimer = new Timer(1500) { AutoReset = false };
+        _refreshTimer.Elapsed += OnRefreshTimerElapsed;
         _reconnectTimer = new Timer(5000) { AutoReset = false };
         _reconnectTimer.Elapsed += OnReconnectTimerElapsed;
     }
@@ -96,6 +99,7 @@ public class OpenRGBDeviceProvider : DeviceProvider
     public override void Disable()
     {
         _running = false;
+        _refreshTimer.Stop();
         _reconnectTimer.Stop();
         RGBDeviceProvider provider = RgbDeviceProvider;
 
@@ -165,7 +169,18 @@ public class OpenRGBDeviceProvider : DeviceProvider
         _reconnectTimer.Start();
     }
 
-    private void QueueReconcile() => _ = Task.Run(ReconcileDeviceList);
+    private void QueueReconcile()
+    {
+        if (!_running)
+            return;
+
+        // OpenRGB emits several list changes while a detection pass is settling. Wait
+        // for a short quiet period so Artemis never sees an intermediate controller list.
+        _refreshTimer.Stop();
+        _refreshTimer.Start();
+    }
+
+    private async void OnRefreshTimerElapsed(object sender, ElapsedEventArgs e) => await ReconcileDeviceList();
 
     private async Task ReconcileDeviceList()
     {

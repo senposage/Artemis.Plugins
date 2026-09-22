@@ -156,6 +156,7 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
     {
         lock (_connectionLock)
         {
+            OpenRGBServerDefinition? refreshingDefinition = null;
             try
             {
                 foreach (OpenRgbClient client in _clients)
@@ -164,6 +165,7 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                         return false;
 
                     OpenRGBServerDefinition definition = _clientDefinitions[client];
+                    refreshingDefinition = definition;
                     uint[] controllerIds = client.GetControllerIds();
                     HashSet<uint> currentIds = controllerIds.ToHashSet();
                     var devices = new Dictionary<uint, (int Index, Device Device)>();
@@ -204,12 +206,22 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                     }
 
                     _controllerIds[definition] = currentIds;
+                    definition.Connected = true;
+                    definition.LastError = null;
                 }
 
                 return true;
             }
             catch (Exception exception)
             {
+                // A timed-out request can leave request and response packets out of sync.
+                // Force the wrapper to replace this client instead of repeatedly querying
+                // a connection whose subsequent snapshots may be incomplete.
+                if (refreshingDefinition != null)
+                {
+                    refreshingDefinition.Connected = false;
+                    refreshingDefinition.LastError = exception.Message;
+                }
                 Throw(exception);
                 return false;
             }
