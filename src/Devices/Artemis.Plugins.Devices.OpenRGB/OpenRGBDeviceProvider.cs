@@ -42,9 +42,9 @@ public class OpenRGBDeviceProvider : DeviceProvider
 
         CreateMissingLedsSupported = false;
         RemoveExcessiveLedsSupported = true;
-        _refreshTimer = new Timer(1500) { AutoReset = false };
+        _refreshTimer = new Timer(500) { AutoReset = false };
         _refreshTimer.Elapsed += OnRefreshTimerElapsed;
-        _reconnectTimer = new Timer(5000) { AutoReset = false };
+        _reconnectTimer = new Timer(1000) { AutoReset = false };
         _reconnectTimer.Elapsed += OnReconnectTimerElapsed;
     }
 
@@ -205,7 +205,7 @@ public class OpenRGBDeviceProvider : DeviceProvider
                     return;
             }
 
-            if (!RgbDeviceProvider.TryRefreshDevices())
+            if (!RgbDeviceProvider.TryRefreshDevices() || RgbDeviceProvider.HasPendingRemovals)
                 _reconnectTimer.Start();
             UpdateStatuses();
         }
@@ -240,6 +240,9 @@ public class OpenRGBDeviceProvider : DeviceProvider
                 _reconnectTimer.Start();
                 return;
             }
+
+            if (RgbDeviceProvider.HasPendingRemovals)
+                _reconnectTimer.Start();
 
             UpdateStatuses();
         }

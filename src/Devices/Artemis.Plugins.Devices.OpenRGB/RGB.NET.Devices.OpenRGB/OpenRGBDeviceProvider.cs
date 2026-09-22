@@ -22,11 +22,14 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
     private readonly List<OpenRgbClient> _clients = [];
     private readonly Dictionary<OpenRgbClient, OpenRGBServerDefinition> _clientDefinitions = [];
     private readonly Dictionary<OpenRGBServerDefinition, HashSet<uint>> _controllerIds = [];
+    private readonly Dictionary<OpenRGBServerDefinition, PendingRemovalSnapshot> _pendingRemovalSnapshots = [];
     private readonly List<OpenRGBUpdateQueue> _updateQueues = [];
     private readonly Dictionary<IRGBDevice, (OpenRgbClient Client, uint ControllerId)> _deviceControllers = [];
     private readonly Dictionary<OpenRgbClient, long> _detectionGenerations = [];
     private readonly Dictionary<OpenRgbClient, long> _detectionEndedAt = [];
     private readonly HashSet<OpenRgbClient> _detectingClients = [];
+    private static readonly TimeSpan DetectionSnapshotQuietPeriod = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan RemovalSnapshotStabilityPeriod = TimeSpan.FromMilliseconds(750);
 
     private static OpenRGBDeviceProvider? _instance;
 
@@ -51,6 +54,18 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
     /// Indicates whether all devices will be added, or just the ones with a 'Direct' mode. Defaults to false.
     /// </summary>
     public bool ForceAddAllDevices { get; set; } = false;
+
+    /// <summary>
+    /// Indicates that a reduced controller list is waiting for a confirming snapshot.
+    /// </summary>
+    public bool HasPendingRemovals
+    {
+        get
+        {
+            lock (_connectionLock)
+                return _pendingRemovalSnapshots.Count > 0;
+        }
+    }
 
     public event Action<OpenRGBServerDefinition>? DeviceListUpdated;
     public event Action<OpenRGBServerDefinition>? ConnectionLost;
@@ -215,6 +230,18 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                         return false;
 
                     (uint[] removedControllers, uint[] addedControllers) = DiffControllerIds(previousIds, currentIds);
+                    bool removalsConfirmed;
+                    if (removedControllers.Length == 0)
+                    {
+                        _pendingRemovalSnapshots.Remove(definition);
+                        removalsConfirmed = true;
+                    }
+                    else
+                    {
+                        removalsConfirmed = IsRemovalSnapshotStable(definition, currentIds);
+                    }
+                    if (!removalsConfirmed)
+                        removedControllers = [];
 
                     foreach (uint removed in removedControllers)
                     {
@@ -240,7 +267,9 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                             AddDevice(addedDevice);
                     }
 
-                    _controllerIds[definition] = currentIds;
+                    _controllerIds[definition] = removalsConfirmed
+                        ? currentIds
+                        : previousIds.Union(currentIds).ToHashSet();
                     definition.Connected = true;
                     definition.LastError = null;
                 }
@@ -321,10 +350,17 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                         }
 
                         long endedAt = Interlocked.Read(ref detectionEndedAt);
-                        bool detectionJustEnded = endedAt > 0 && DateTime.UtcNow.Ticks - endedAt < TimeSpan.FromMilliseconds(1500).Ticks;
+                        bool detectionJustEnded = endedAt > 0 && DateTime.UtcNow.Ticks - endedAt < DetectionSnapshotQuietPeriod.Ticks;
                         if (Volatile.Read(ref detectionInProgress) != 0 ||
                             Interlocked.Read(ref detectionGeneration) != snapshotGeneration || detectionJustEnded)
                             throw new InvalidOperationException("OpenRGB device detection changed while reading the replacement controller snapshot");
+
+                        HashSet<uint> previousIds = _controllerIds.GetValueOrDefault(definition) ?? [];
+                        uint[] removedControllers = previousIds.Except(ids).ToArray();
+                        if (removedControllers.Length > 0 && !IsRemovalSnapshotStable(definition, ids))
+                            throw new InvalidOperationException("OpenRGB controller removals are waiting for a confirming snapshot");
+                        if (removedControllers.Length == 0)
+                            _pendingRemovalSnapshots.Remove(definition);
 
                         replacements.Add((oldClient, newClient, definition, ids, devices));
                     }
@@ -469,6 +505,7 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                 }
 
                 _controllerIds[definition] = controllerIds.ToHashSet();
+                _pendingRemovalSnapshots.Remove(definition);
 
                 foreach ((int index, uint controllerId, Device device) in controllerData)
                     loadedDevices.AddRange(CreateDevicesForController(openRgb, definition, index, controllerId, device));
@@ -485,6 +522,7 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                 definition.Connected = false;
                 definition.LastError = exception.Message;
                 _controllerIds[definition] = [];
+                _pendingRemovalSnapshots.Remove(definition);
             }
         }
 
@@ -553,13 +591,29 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
         return (previous.Except(current).ToArray(), current.Except(previous).ToArray());
     }
 
+    private bool IsRemovalSnapshotStable(OpenRGBServerDefinition definition, HashSet<uint> currentIds)
+    {
+        if (!_pendingRemovalSnapshots.TryGetValue(definition, out PendingRemovalSnapshot? pending) ||
+            !pending.ControllerIds.SetEquals(currentIds))
+        {
+            _pendingRemovalSnapshots[definition] = new PendingRemovalSnapshot(currentIds.ToHashSet(), DateTime.UtcNow);
+            return false;
+        }
+
+        if (DateTime.UtcNow - pending.FirstSeenAt < RemovalSnapshotStabilityPeriod)
+            return false;
+
+        _pendingRemovalSnapshots.Remove(definition);
+        return true;
+    }
+
     private bool TryBeginControllerSnapshot(OpenRgbClient client, out long generation)
     {
         lock (_detectionStateLock)
         {
             generation = _detectionGenerations.GetValueOrDefault(client);
             long endedAt = _detectionEndedAt.GetValueOrDefault(client);
-            bool detectionJustEnded = endedAt > 0 && DateTime.UtcNow.Ticks - endedAt < TimeSpan.FromMilliseconds(1500).Ticks;
+            bool detectionJustEnded = endedAt > 0 && DateTime.UtcNow.Ticks - endedAt < DetectionSnapshotQuietPeriod.Ticks;
             return !_detectingClients.Contains(client) && !detectionJustEnded;
         }
     }
@@ -599,6 +653,7 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
         _clients.Clear();
         _clientDefinitions.Clear();
         _controllerIds.Clear();
+        _pendingRemovalSnapshots.Clear();
         _updateQueues.Clear();
         _deviceControllers.Clear();
         lock (_detectionStateLock)
@@ -631,4 +686,6 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
     }
 
     #endregion
+
+    private sealed record PendingRemovalSnapshot(HashSet<uint> ControllerIds, DateTime FirstSeenAt);
 }
