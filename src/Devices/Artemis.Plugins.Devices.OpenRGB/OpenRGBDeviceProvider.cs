@@ -53,6 +53,18 @@ public class OpenRGBDeviceProvider : DeviceProvider
     public override string GetDeviceIdentifier(IRGBDevice device) =>
         device is IOpenRGBDevice openRgbDevice ? openRgbDevice.PersistentId : base.GetDeviceIdentifier(device);
 
+    public override string? GetParentDeviceIdentifier(string deviceIdentifier)
+    {
+        int separatorIndex = deviceIdentifier.LastIndexOf('|');
+        if (separatorIndex < 0 || separatorIndex == deviceIdentifier.Length - 1)
+            return null;
+
+        string partIdentity = deviceIdentifier[(separatorIndex + 1)..];
+        return partIdentity.StartsWith("zone:", StringComparison.Ordinal)
+            ? deviceIdentifier[..separatorIndex]
+            : null;
+    }
+
     public string SdkStatus
     {
         get
