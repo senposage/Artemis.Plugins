@@ -53,6 +53,11 @@ public class OpenRGBDeviceProvider : DeviceProvider
     public override string GetDeviceIdentifier(IRGBDevice device) =>
         device is IOpenRGBDevice openRgbDevice ? openRgbDevice.PersistentId : base.GetDeviceIdentifier(device);
 
+    public override IEnumerable<string> GetLegacyDeviceIdentifiers(IRGBDevice device) =>
+        device is IOpenRGBDevice { LegacyPersistentId: { } legacyPersistentId }
+            ? [legacyPersistentId]
+            : [];
+
     public override string? GetParentDeviceIdentifier(string deviceIdentifier)
     {
         int separatorIndex = deviceIdentifier.LastIndexOf('|');

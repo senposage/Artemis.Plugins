@@ -11,4 +11,7 @@ public interface IOpenRGBDevice : IRGBDevice
     /// Gets an identifier containing the OpenRGB server, reported device location, and split-device part.
     /// </summary>
     string PersistentId { get; }
+
+    /// <summary>Gets the location-based identifier used before a provider identity migration.</summary>
+    string? LegacyPersistentId { get; }
 }

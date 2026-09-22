@@ -33,6 +33,19 @@ public class ProviderLifecycleTests
     }
 
     [Fact]
+    public void VulcanInterfacesShareOneControllerIdentity()
+    {
+        const string firstInterface = "HID: \\\\?\\HID#VID_1E7D&PID_2EE2&MI_01&Col05#9&3131fbf1&0&0004";
+        const string secondInterface = "HID: \\\\?\\HID#VID_1E7D&PID_2EE2&MI_03#9&251e4a74&0&0000";
+
+        string firstIdentity = TestOpenRGBDevice.GetControllerIdentity(firstInterface, 10, "Roccat Vulcan II Max");
+        string secondIdentity = TestOpenRGBDevice.GetControllerIdentity(secondInterface, 99, "Roccat Vulcan II Max");
+
+        Assert.Equal("HidProduct:VID_1E7D&PID_2EE2", firstIdentity);
+        Assert.Equal(firstIdentity, secondIdentity);
+    }
+
+    [Fact]
     public void DisposedProviderCanBeRecreated()
     {
         OpenRGBDeviceProvider provider = OpenRGBDeviceProvider.Instance;

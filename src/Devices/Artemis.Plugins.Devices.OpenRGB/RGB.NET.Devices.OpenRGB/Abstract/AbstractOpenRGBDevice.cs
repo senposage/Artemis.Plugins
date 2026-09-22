@@ -1,3 +1,4 @@
+using System;
 using RGB.NET.Core;
 
 namespace RGB.NET.Devices.OpenRGB;
@@ -19,15 +20,30 @@ public abstract class AbstractOpenRGBDevice<TDeviceInfo> : AbstractRGBDevice<TDe
     protected AbstractOpenRGBDevice(TDeviceInfo info, IUpdateQueue updateQueue, string partIdentity)
         : base(info, updateQueue)
     {
-        string deviceIdentity = GetControllerIdentity(info.OpenRGBDevice.Location, info.ControllerId);
+        string locationIdentity = GetControllerIdentity(info.OpenRGBDevice.Location, info.ControllerId);
+        string deviceIdentity = GetControllerIdentity(info.OpenRGBDevice.Location, info.ControllerId, info.OpenRGBDevice.Name);
         PersistentId = $"OpenRGB:{info.ServerIdentity}|{deviceIdentity}|{partIdentity}";
+        string locationPersistentId = $"OpenRGB:{info.ServerIdentity}|{locationIdentity}|{partIdentity}";
+        LegacyPersistentId = locationPersistentId == PersistentId ? null : locationPersistentId;
     }
 
-    internal static string GetControllerIdentity(string? location, uint controllerId) =>
-        string.IsNullOrWhiteSpace(location) ? $"Controller:{controllerId}" : $"Location:{location}";
+    internal static string GetControllerIdentity(string? location, uint controllerId, string? controllerName = null)
+    {
+        // OpenRGB alternates the Vulcan II Max between HID interfaces during a
+        // rescan. The interfaces do not report a serial, but the product VID/PID
+        // is stable, unlike the MI_01/MI_03 path and instance suffix.
+        if (controllerName == "Roccat Vulcan II Max" &&
+            location?.Contains("VID_1E7D&PID_2EE2", StringComparison.OrdinalIgnoreCase) == true)
+            return "HidProduct:VID_1E7D&PID_2EE2";
+
+        return string.IsNullOrWhiteSpace(location) ? $"Controller:{controllerId}" : $"Location:{location}";
+    }
 
     /// <inheritdoc />
     public string PersistentId { get; }
+
+    /// <inheritdoc />
+    public string? LegacyPersistentId { get; }
 
     #endregion
 }
