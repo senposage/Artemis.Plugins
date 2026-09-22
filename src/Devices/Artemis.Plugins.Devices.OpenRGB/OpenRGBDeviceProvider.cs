@@ -138,12 +138,21 @@ public class OpenRGBDeviceProvider : DeviceProvider
             _detectingServers.Add(definition);
             _sdkStatuses[GetDefinitionKey(definition)] = "device detection in progress";
         }
+        // A previously queued refresh/reconnect must not sample OpenRGB while its
+        // controller registry is intentionally incomplete.
+        _refreshTimer.Stop();
+        _reconnectTimer.Stop();
+        _logger.Debug("OpenRGB detection started for {Server}; pausing device-list reconciliation", GetDefinitionKey(definition));
     }
 
     private void ProviderOnDetectionEnded(OpenRGBServerDefinition definition)
     {
         lock (_stateLock)
+        {
             _detectingServers.Remove(definition);
+            _sdkStatuses[GetDefinitionKey(definition)] = "device detection complete; waiting for device list to settle";
+        }
+        _logger.Debug("OpenRGB detection ended for {Server}; waiting for the post-detection quiet period", GetDefinitionKey(definition));
         QueueReconcile();
     }
 
@@ -190,6 +199,12 @@ public class OpenRGBDeviceProvider : DeviceProvider
             if (!_running)
                 return;
 
+            lock (_stateLock)
+            {
+                if (_detectingServers.Count > 0)
+                    return;
+            }
+
             if (!RgbDeviceProvider.TryRefreshDevices())
                 _reconnectTimer.Start();
             UpdateStatuses();
@@ -207,6 +222,15 @@ public class OpenRGBDeviceProvider : DeviceProvider
         {
             if (!_running)
                 return;
+
+            lock (_stateLock)
+            {
+                if (_detectingServers.Count > 0)
+                {
+                    _reconnectTimer.Start();
+                    return;
+                }
+            }
 
             bool repaired = RgbDeviceProvider.DeviceDefinitions.Any(definition => !definition.Connected)
                 ? RgbDeviceProvider.TryReconnectDevices()

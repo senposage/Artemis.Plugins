@@ -18,11 +18,15 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
     // ReSharper disable once InconsistentNaming
     private static readonly Lock _lock = new();
     private readonly Lock _connectionLock = new();
+    private readonly object _detectionStateLock = new();
     private readonly List<OpenRgbClient> _clients = [];
     private readonly Dictionary<OpenRgbClient, OpenRGBServerDefinition> _clientDefinitions = [];
     private readonly Dictionary<OpenRGBServerDefinition, HashSet<uint>> _controllerIds = [];
     private readonly List<OpenRGBUpdateQueue> _updateQueues = [];
     private readonly Dictionary<IRGBDevice, (OpenRgbClient Client, uint ControllerId)> _deviceControllers = [];
+    private readonly Dictionary<OpenRgbClient, long> _detectionGenerations = [];
+    private readonly Dictionary<OpenRgbClient, long> _detectionEndedAt = [];
+    private readonly HashSet<OpenRgbClient> _detectingClients = [];
 
     private static OpenRGBDeviceProvider? _instance;
 
@@ -94,6 +98,8 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
 
     private void Subscribe(OpenRgbClient client)
     {
+        lock (_detectionStateLock)
+            _detectionGenerations.TryAdd(client, 0);
         client.DeviceListUpdated += ClientOnDeviceListUpdated;
         client.ConnectionLost += ClientOnConnectionLost;
         client.DetectionStarted += ClientOnDetectionStarted;
@@ -106,6 +112,12 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
         client.ConnectionLost -= ClientOnConnectionLost;
         client.DetectionStarted -= ClientOnDetectionStarted;
         client.DetectionEnded -= ClientOnDetectionEnded;
+        lock (_detectionStateLock)
+        {
+            _detectingClients.Remove(client);
+            _detectionGenerations.Remove(client);
+            _detectionEndedAt.Remove(client);
+        }
     }
 
     private bool TryGetDefinition(object? sender, out OpenRGBServerDefinition definition)
@@ -139,12 +151,29 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
 
     private void ClientOnDetectionStarted(object? sender, EventArgs args)
     {
+        if (sender is OpenRgbClient client)
+        {
+            lock (_detectionStateLock)
+            {
+                _detectingClients.Add(client);
+                _detectionGenerations[client] = _detectionGenerations.GetValueOrDefault(client) + 1;
+            }
+        }
         if (TryGetDefinition(sender, out OpenRGBServerDefinition definition))
             DetectionStarted?.Invoke(definition);
     }
 
     private void ClientOnDetectionEnded(object? sender, EventArgs args)
     {
+        if (sender is OpenRgbClient client)
+        {
+            lock (_detectionStateLock)
+            {
+                _detectingClients.Remove(client);
+                _detectionEndedAt[client] = DateTime.UtcNow.Ticks;
+                _detectionGenerations[client] = _detectionGenerations.GetValueOrDefault(client) + 1;
+            }
+        }
         if (TryGetDefinition(sender, out OpenRGBServerDefinition definition))
             DetectionEnded?.Invoke(definition);
     }
@@ -164,6 +193,9 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                     if (!client.Connected)
                         return false;
 
+                    if (!TryBeginControllerSnapshot(client, out long detectionGeneration))
+                        return false;
+
                     OpenRGBServerDefinition definition = _clientDefinitions[client];
                     refreshingDefinition = definition;
                     uint[] controllerIds = client.GetControllerIds();
@@ -175,6 +207,9 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                         Device device = client.GetControllerData(i);
                         devices[controllerIds[i]] = (i, device);
                     }
+
+                    if (!IsControllerSnapshotValid(client, detectionGeneration))
+                        return false;
 
                     if (!_controllerIds.TryGetValue(definition, out HashSet<uint>? previousIds))
                         return false;
@@ -246,8 +281,31 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                     OpenRgbClient? oldClient = _clientDefinitions
                         .FirstOrDefault(pair => ReferenceEquals(pair.Value, definition)).Key;
                     var newClient = new OpenRgbClient(definition.Ip, definition.Port, definition.ClientName);
+                    long detectionGeneration = 0;
+                    int detectionInProgress = 0;
+                    long detectionEndedAt = 0;
+
+                    void DetectionStarted(object? sender, EventArgs args)
+                    {
+                        Volatile.Write(ref detectionInProgress, 1);
+                        Interlocked.Increment(ref detectionGeneration);
+                    }
+
+                    void DetectionEnded(object? sender, EventArgs args)
+                    {
+                        Volatile.Write(ref detectionInProgress, 0);
+                        Interlocked.Exchange(ref detectionEndedAt, DateTime.UtcNow.Ticks);
+                        Interlocked.Increment(ref detectionGeneration);
+                    }
+
+                    // A replacement connection must observe detection notifications before
+                    // its first snapshot. Otherwise a reconnect can publish the temporary
+                    // controller list that OpenRGB exposes halfway through device detection.
+                    newClient.DetectionStarted += DetectionStarted;
+                    newClient.DetectionEnded += DetectionEnded;
                     try
                     {
+                        long snapshotGeneration = Interlocked.Read(ref detectionGeneration);
                         uint[] controllerIds = newClient.GetControllerIds();
                         HashSet<uint> ids = controllerIds.ToHashSet();
                         var devices = new Dictionary<uint, (int Index, Device Device)>();
@@ -262,12 +320,23 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                                 newClient.UpdateMode(i, device, directModeIndex);
                         }
 
+                        long endedAt = Interlocked.Read(ref detectionEndedAt);
+                        bool detectionJustEnded = endedAt > 0 && DateTime.UtcNow.Ticks - endedAt < TimeSpan.FromMilliseconds(1500).Ticks;
+                        if (Volatile.Read(ref detectionInProgress) != 0 ||
+                            Interlocked.Read(ref detectionGeneration) != snapshotGeneration || detectionJustEnded)
+                            throw new InvalidOperationException("OpenRGB device detection changed while reading the replacement controller snapshot");
+
                         replacements.Add((oldClient, newClient, definition, ids, devices));
                     }
                     catch
                     {
                         newClient.Dispose();
                         throw;
+                    }
+                    finally
+                    {
+                        newClient.DetectionStarted -= DetectionStarted;
+                        newClient.DetectionEnded -= DetectionEnded;
                     }
                 }
 
@@ -484,6 +553,23 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
         return (previous.Except(current).ToArray(), current.Except(previous).ToArray());
     }
 
+    private bool TryBeginControllerSnapshot(OpenRgbClient client, out long generation)
+    {
+        lock (_detectionStateLock)
+        {
+            generation = _detectionGenerations.GetValueOrDefault(client);
+            long endedAt = _detectionEndedAt.GetValueOrDefault(client);
+            bool detectionJustEnded = endedAt > 0 && DateTime.UtcNow.Ticks - endedAt < TimeSpan.FromMilliseconds(1500).Ticks;
+            return !_detectingClients.Contains(client) && !detectionJustEnded;
+        }
+    }
+
+    private bool IsControllerSnapshotValid(OpenRgbClient client, long generation)
+    {
+        lock (_detectionStateLock)
+            return !_detectingClients.Contains(client) && _detectionGenerations.GetValueOrDefault(client) == generation;
+    }
+
     /// <inheritdoc />
     protected override void Reset()
     {
@@ -515,6 +601,12 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
         _controllerIds.Clear();
         _updateQueues.Clear();
         _deviceControllers.Clear();
+        lock (_detectionStateLock)
+        {
+            _detectingClients.Clear();
+            _detectionGenerations.Clear();
+            _detectionEndedAt.Clear();
+        }
     }
 
     /// <inheritdoc />
