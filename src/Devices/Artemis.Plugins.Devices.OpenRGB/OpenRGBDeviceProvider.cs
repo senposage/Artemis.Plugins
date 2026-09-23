@@ -18,6 +18,8 @@ namespace Artemis.Plugins.Devices.OpenRGB;
 [PluginFeature(Name = "OpenRGB Device Provider")]
 public class OpenRGBDeviceProvider : DeviceProvider
 {
+    private static readonly TimeSpan SnapshotRetryDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan ConnectionRetryDelay = TimeSpan.FromSeconds(5);
     private readonly ILogger _logger;
     private readonly IDeviceService _deviceService;
     private readonly PluginSetting<List<OpenRGBServerDefinition>> _deviceDefinitionsSettings;
@@ -145,8 +147,20 @@ public class OpenRGBDeviceProvider : DeviceProvider
         provider.DetectionEnded -= ProviderOnDetectionEnded;
     }
 
-    private void Provider_OnException(object sender, ExceptionEventArgs args) =>
+    private void Provider_OnException(object sender, ExceptionEventArgs args)
+    {
+        // Connection attempts and snapshot confirmation are expected while OpenRGB
+        // restarts or scans. Logging their stack traces on every retry creates a
+        // surprising amount of allocation and disk activity.
+        if (args.Exception is TimeoutException ||
+            args.Exception.Message == "OpenRGB controller removals are waiting for a confirming snapshot")
+        {
+            _logger.Debug("OpenRGB reconciliation deferred: {Message}", args.Exception.Message);
+            return;
+        }
+
         _logger.Debug(args.Exception, "OpenRGB Exception: {message}", args.Exception.Message);
+    }
 
     private void ProviderOnDetectionStarted(OpenRGBServerDefinition definition)
     {
@@ -192,7 +206,7 @@ public class OpenRGBDeviceProvider : DeviceProvider
             _detectingServers.Remove(definition);
             _sdkStatuses[GetDefinitionKey(definition)] = "disconnected";
         }
-        _reconnectTimer.Start();
+        ScheduleReconnect(SnapshotRetryDelay);
     }
 
     private void QueueReconcile()
@@ -223,7 +237,7 @@ public class OpenRGBDeviceProvider : DeviceProvider
             }
 
             if (!RgbDeviceProvider.TryRefreshDevices() || RgbDeviceProvider.HasPendingRemovals)
-                _reconnectTimer.Start();
+                ScheduleReconnect(GetReconnectDelay());
             UpdateStatuses();
         }
         finally
@@ -244,7 +258,7 @@ public class OpenRGBDeviceProvider : DeviceProvider
             {
                 if (_detectingServers.Count > 0)
                 {
-                    _reconnectTimer.Start();
+                    ScheduleReconnect(SnapshotRetryDelay);
                     return;
                 }
             }
@@ -254,12 +268,12 @@ public class OpenRGBDeviceProvider : DeviceProvider
                 : RgbDeviceProvider.TryRefreshDevices();
             if (!repaired)
             {
-                _reconnectTimer.Start();
+                ScheduleReconnect(GetReconnectDelay());
                 return;
             }
 
             if (RgbDeviceProvider.HasPendingRemovals)
-                _reconnectTimer.Start();
+                ScheduleReconnect(SnapshotRetryDelay);
 
             UpdateStatuses();
         }
@@ -278,6 +292,21 @@ public class OpenRGBDeviceProvider : DeviceProvider
                     ? $"protocol v{RgbDeviceProvider.ProtocolVersionFor(definition)}, connected"
                     : $"disconnected{(string.IsNullOrWhiteSpace(definition.LastError) ? string.Empty : $": {definition.LastError}")}";
         }
+    }
+
+    private TimeSpan GetReconnectDelay() =>
+        RgbDeviceProvider.DeviceDefinitions.Any(definition => !definition.Connected)
+            ? ConnectionRetryDelay
+            : SnapshotRetryDelay;
+
+    private void ScheduleReconnect(TimeSpan delay)
+    {
+        if (!_running)
+            return;
+
+        _reconnectTimer.Stop();
+        _reconnectTimer.Interval = delay.TotalMilliseconds;
+        _reconnectTimer.Start();
     }
 
     private static string GetDefinitionKey(OpenRGBServerDefinition definition) => $"{definition.Ip}:{definition.Port}";
