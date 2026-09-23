@@ -56,6 +56,16 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
     public bool ForceAddAllDevices { get; set; } = false;
 
     /// <summary>
+    /// Re-requests Direct mode when an existing controller reports a different active mode after a refresh.
+    /// </summary>
+    public bool ForceRequestDirectModeOnRefresh { get; set; }
+
+    /// <summary>
+    /// Returns whether Artemis is currently rendering a layer on this individual OpenRGB SDK device.
+    /// </summary>
+    public Func<OpenRGBServerDefinition, uint, bool>? IsSdkDeviceInUse { get; set; }
+
+    /// <summary>
     /// Indicates that a reduced controller list is waiting for a confirming snapshot.
     /// </summary>
     public bool HasPendingRemovals
@@ -229,6 +239,20 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                     if (!_controllerIds.TryGetValue(definition, out HashSet<uint>? previousIds))
                         return false;
 
+                    if (ForceRequestDirectModeOnRefresh)
+                    {
+                        foreach ((uint controllerId, (int index, Device device)) in devices)
+                        {
+                            if (!previousIds.Contains(controllerId))
+                                continue; // New controllers request Direct mode in CreateDevicesForController.
+
+                            int directModeIndex = Array.FindIndex(device.Modes, mode => mode.Name == "Direct");
+                            if (directModeIndex >= 0 && device.ActiveModeIndex != directModeIndex &&
+                                IsSdkDeviceInUse?.Invoke(definition, controllerId) == true)
+                                client.UpdateMode(index, device, directModeIndex);
+                        }
+                    }
+
                     (uint[] removedControllers, uint[] addedControllers) = DiffControllerIds(previousIds, currentIds);
                     bool removalsConfirmed;
                     if (removedControllers.Length == 0)
@@ -344,9 +368,6 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                             Device device = newClient.GetControllerData(i);
                             devices[controllerIds[i]] = (i, device);
 
-                            int directModeIndex = Array.FindIndex(device.Modes, mode => mode.Name == "Direct");
-                            if (directModeIndex >= 0)
-                                newClient.UpdateMode(i, device, directModeIndex);
                         }
 
                         long endedAt = Interlocked.Read(ref detectionEndedAt);
@@ -533,9 +554,7 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
         int controllerIndex, uint controllerId, Device device)
     {
         int directModeIndex = Array.FindIndex(device.Modes, d => d.Name == "Direct");
-        if (directModeIndex >= 0)
-            client.UpdateMode(controllerIndex, device, directModeIndex);
-        else if (!ForceAddAllDevices)
+        if (directModeIndex < 0 && !ForceAddAllDevices)
             return [];
 
         if (device.Zones.Length == 0 || device.Zones.All(z => z.LedCount == 0))

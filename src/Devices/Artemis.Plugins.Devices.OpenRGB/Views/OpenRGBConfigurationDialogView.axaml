@@ -5,7 +5,7 @@
              xmlns:avalonia="clr-namespace:Material.Icons.Avalonia;assembly=Material.Icons.Avalonia"
              mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
              x:Class="Artemis.Plugins.Devices.OpenRGB.Views.OpenRGBConfigurationDialogView">
-    <Grid RowDefinitions="Auto,Auto,300,Auto,Auto,*">
+    <Grid RowDefinitions="Auto,Auto,300,Auto,Auto,Auto,*">
         <StackPanel Grid.Row="0" Classes="plugin-introduction">
             <TextBlock TextWrapping="Wrap">
                 Configure the OpenRGB SDK servers Artemis should connect to. Protocol v6 servers support live device hotplugging.
@@ -66,7 +66,19 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="5" ColumnDefinitions="*,Auto" VerticalAlignment="Bottom">
+        <Border Grid.Row="5" Classes="card">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Grid.Column="0">
+                    <TextBlock>Re-request Direct mode for devices with active layers</TextBlock>
+                    <TextBlock Classes="subtitle" TextWrapping="Wrap">
+                        If an individual OpenRGB device leaves Direct mode during a rescan, request it again only while Artemis is using that device in an active layer.
+                    </TextBlock>
+                </StackPanel>
+                <ToggleSwitch Grid.Column="1" IsChecked="{Binding RequestDirectForActiveLayers}" MinWidth="0" VerticalAlignment="Center" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="6" ColumnDefinitions="*,Auto" VerticalAlignment="Bottom">
             <Button Command="{Binding AddDefinition}">
                 Add server
             </Button>

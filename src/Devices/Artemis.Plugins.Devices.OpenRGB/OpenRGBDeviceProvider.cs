@@ -22,8 +22,10 @@ public class OpenRGBDeviceProvider : DeviceProvider
     private static readonly TimeSpan ConnectionRetryDelay = TimeSpan.FromSeconds(5);
     private readonly ILogger _logger;
     private readonly IDeviceService _deviceService;
+    private readonly IProfileService _profileService;
     private readonly PluginSetting<List<OpenRGBServerDefinition>> _deviceDefinitionsSettings;
     private readonly PluginSetting<bool> _forceAddAllDevicesSetting;
+    private readonly PluginSetting<bool> _requestDirectForActiveLayersSetting;
     private readonly Timer _refreshTimer;
     private readonly Timer _reconnectTimer;
     private readonly SemaphoreSlim _reconcileLock = new(1, 1);
@@ -32,11 +34,13 @@ public class OpenRGBDeviceProvider : DeviceProvider
     private readonly object _stateLock = new();
     private volatile bool _running;
 
-    public OpenRGBDeviceProvider(IDeviceService deviceService, PluginSettings settings, ILogger logger)
+    public OpenRGBDeviceProvider(IDeviceService deviceService, IProfileService profileService, PluginSettings settings, ILogger logger)
     {
         _logger = logger;
         _deviceService = deviceService;
+        _profileService = profileService;
         _forceAddAllDevicesSetting = settings.GetSetting("ForceAddAllDevices", false);
+        _requestDirectForActiveLayersSetting = settings.GetSetting("RequestDirectForActiveLayers", true);
         _deviceDefinitionsSettings = settings.GetSetting("DeviceDefinitions", new List<OpenRGBServerDefinition>
         {
             new() { ClientName = "Artemis", Ip = "127.0.0.1", Port = 6742 }
@@ -54,6 +58,20 @@ public class OpenRGBDeviceProvider : DeviceProvider
 
     public override string GetDeviceIdentifier(IRGBDevice device) =>
         device is IOpenRGBDevice openRgbDevice ? openRgbDevice.PersistentId : base.GetDeviceIdentifier(device);
+
+    public override string? GetReconnectionSignature(IRGBDevice device)
+    {
+        if (device.DeviceInfo is not OpenRGBDeviceInfo deviceInfo || device is not IOpenRGBDevice openRgbDevice)
+            return null;
+
+        // This is deliberately a provider-level logical-device signature, not a hardware identifier. It remains
+        // stable when OpenRGB recreates a controller with a different runtime location, while the split-device part
+        // and LED topology prevent a controller and one of its zones from being reconciled as the same device.
+        int separatorIndex = openRgbDevice.PersistentId.LastIndexOf('|');
+        string partIdentity = separatorIndex >= 0 ? openRgbDevice.PersistentId[(separatorIndex + 1)..] : string.Empty;
+        string ledTopology = string.Join(",", device.Select(led => led.Id.ToString()).OrderBy(id => id, StringComparer.Ordinal));
+        return string.Join("|", deviceInfo.ServerIdentity, deviceInfo.Manufacturer, deviceInfo.Model, deviceInfo.DeviceType, partIdentity, ledTopology);
+    }
 
     public override IEnumerable<string> GetLegacyDeviceIdentifiers(IRGBDevice device) =>
         device is IOpenRGBDevice { LegacyPersistentId: { } legacyPersistentId }
@@ -93,10 +111,15 @@ public class OpenRGBDeviceProvider : DeviceProvider
         provider.ConnectionLost += ProviderOnConnectionLost;
         provider.DetectionStarted += ProviderOnDetectionStarted;
         provider.DetectionEnded += ProviderOnDetectionEnded;
+        _deviceService.DeviceAdded += DeviceServiceOnDeviceAdded;
+        _deviceService.DeviceReconnected += DeviceServiceOnDeviceAdded;
+        _profileService.ProfileActivated += ProfileServiceOnProfileActivated;
 
         foreach (OpenRGBServerDefinition definition in _deviceDefinitionsSettings.Value)
             provider.DeviceDefinitions.Add(definition);
         provider.ForceAddAllDevices = _forceAddAllDevicesSetting.Value;
+        provider.ForceRequestDirectModeOnRefresh = _requestDirectForActiveLayersSetting.Value;
+        provider.IsSdkDeviceInUse = IsSdkDeviceInUse;
 
         try
         {
@@ -104,13 +127,20 @@ public class OpenRGBDeviceProvider : DeviceProvider
         }
         catch
         {
+            _deviceService.DeviceAdded -= DeviceServiceOnDeviceAdded;
+            _deviceService.DeviceReconnected -= DeviceServiceOnDeviceAdded;
+            _profileService.ProfileActivated -= ProfileServiceOnProfileActivated;
             DetachProviderEvents(provider);
+            provider.IsSdkDeviceInUse = null;
+            provider.ForceRequestDirectModeOnRefresh = false;
             provider.Dispose();
             _running = false;
             throw;
         }
 
         UpdateStatuses();
+        if (_requestDirectForActiveLayersSetting.Value)
+            QueueReconcile();
         if (provider.DeviceDefinitions.Any(definition => !definition.Connected))
             _reconnectTimer.Start();
     }
@@ -120,6 +150,9 @@ public class OpenRGBDeviceProvider : DeviceProvider
         _running = false;
         _refreshTimer.Stop();
         _reconnectTimer.Stop();
+        _deviceService.DeviceAdded -= DeviceServiceOnDeviceAdded;
+        _deviceService.DeviceReconnected -= DeviceServiceOnDeviceAdded;
+        _profileService.ProfileActivated -= ProfileServiceOnProfileActivated;
         RGBDeviceProvider provider = RgbDeviceProvider;
 
         try
@@ -129,6 +162,8 @@ public class OpenRGBDeviceProvider : DeviceProvider
         finally
         {
             DetachProviderEvents(provider);
+            provider.IsSdkDeviceInUse = null;
+            provider.ForceRequestDirectModeOnRefresh = false;
             provider.Dispose();
             lock (_stateLock)
             {
@@ -209,6 +244,37 @@ public class OpenRGBDeviceProvider : DeviceProvider
         ScheduleReconnect(SnapshotRetryDelay);
     }
 
+    private void DeviceServiceOnDeviceAdded(object? sender, DeviceEventArgs args)
+    {
+        if (_requestDirectForActiveLayersSetting.Value && ReferenceEquals(args.Device.DeviceProvider, this))
+            QueueReconcile();
+    }
+
+    private void ProfileServiceOnProfileActivated(object? sender, ProfileConfigurationEventArgs args)
+    {
+        if (_requestDirectForActiveLayersSetting.Value)
+            QueueReconcile();
+    }
+
+    private bool IsSdkDeviceInUse(OpenRGBServerDefinition definition, uint sdkDeviceId)
+    {
+        string serverIdentity = GetDefinitionKey(definition);
+        HashSet<ArtemisDevice> devices = _deviceService.Devices
+            .Where(device => device.IsEnabled && device.IsConnected &&
+                             device.RgbDevice.DeviceInfo is OpenRGBDeviceInfo info &&
+                             info.ServerIdentity == serverIdentity && info.ControllerId == sdkDeviceId)
+            .ToHashSet();
+        if (devices.Count == 0)
+            return false;
+
+        return _profileService.ProfileCategories
+            .SelectMany(category => category.ProfileConfigurations)
+            .Select(configuration => configuration.Profile)
+            .Where(profile => profile != null)
+            .Any(profile => profile!.GetAllLayers().Any(layer =>
+                layer.Enabled && layer.Leds.Any(led => devices.Contains(led.Device))));
+    }
+
     private void QueueReconcile()
     {
         if (!_running)
@@ -276,6 +342,8 @@ public class OpenRGBDeviceProvider : DeviceProvider
                 ScheduleReconnect(SnapshotRetryDelay);
 
             UpdateStatuses();
+            if (_requestDirectForActiveLayersSetting.Value)
+                QueueReconcile();
         }
         finally
         {

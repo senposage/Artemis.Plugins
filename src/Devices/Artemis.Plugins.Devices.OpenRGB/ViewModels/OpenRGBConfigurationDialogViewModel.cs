@@ -16,9 +16,11 @@ namespace Artemis.Plugins.Devices.OpenRGB.ViewModels
     {
         private readonly PluginSetting<List<OpenRGBServerDefinition>> _definitions;
         private readonly PluginSetting<bool> _forceAddAllDevicesSetting;
+        private readonly PluginSetting<bool> _requestDirectForActiveLayersSetting;
         private readonly IPluginManagementService _pluginManagementService;
         private readonly IWindowService _windowService;
         private bool _forceAddAllDevices;
+        private bool _requestDirectForActiveLayers;
 
         public OpenRGBConfigurationDialogViewModel(Plugin plugin, PluginSettings settings, IPluginManagementService pluginManagementService, IWindowService windowService) : base(plugin)
         {
@@ -26,9 +28,11 @@ namespace Artemis.Plugins.Devices.OpenRGB.ViewModels
             _windowService = windowService;
             _definitions = settings.GetSetting("DeviceDefinitions", new List<OpenRGBServerDefinition>());
             _forceAddAllDevicesSetting = settings.GetSetting("ForceAddAllDevices", false);
+            _requestDirectForActiveLayersSetting = settings.GetSetting("RequestDirectForActiveLayers", true);
 
             Definitions = new ObservableCollection<OpenRGBServerDefinition>(_definitions.Value);
             ForceAddAllDevices = _forceAddAllDevicesSetting.Value;
+            RequestDirectForActiveLayers = _requestDirectForActiveLayersSetting.Value;
             SdkStatus = plugin.GetFeature<OpenRGBDeviceProvider>()?.SdkStatus ?? "SDK status: plugin is disabled";
             DeleteDefinition = ReactiveCommand.Create<OpenRGBServerDefinition>(ExecuteDeleteDefinition);
         }
@@ -43,6 +47,12 @@ namespace Artemis.Plugins.Devices.OpenRGB.ViewModels
         {
             get => _forceAddAllDevices;
             set => this.RaiseAndSetIfChanged(ref _forceAddAllDevices, value);
+        }
+
+        public bool RequestDirectForActiveLayers
+        {
+            get => _requestDirectForActiveLayers;
+            set => this.RaiseAndSetIfChanged(ref _requestDirectForActiveLayers, value);
         }
 
         public void AddDefinition()
@@ -65,6 +75,9 @@ namespace Artemis.Plugins.Devices.OpenRGB.ViewModels
             _forceAddAllDevicesSetting.Value = ForceAddAllDevices;
             _forceAddAllDevicesSetting.Save();
 
+            _requestDirectForActiveLayersSetting.Value = RequestDirectForActiveLayers;
+            _requestDirectForActiveLayersSetting.Save();
+
             // Fire & forget re-enabling the plugin
             Task.Run(() =>
             {
@@ -83,6 +96,7 @@ namespace Artemis.Plugins.Devices.OpenRGB.ViewModels
 
             _definitions.RejectChanges();
             _forceAddAllDevicesSetting.RejectChanges();
+            _requestDirectForActiveLayersSetting.RejectChanges();
             Close();
         }
     }
