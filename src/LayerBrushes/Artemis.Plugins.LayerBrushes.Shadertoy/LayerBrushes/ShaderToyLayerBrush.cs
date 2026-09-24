@@ -19,6 +19,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     private string? _pendingRendererSignature;
     private int _rendererBuildVersion;
     private bool _disposed;
+    private double _renderRequestAccumulator;
 
     /// <summary>Last shader compile/link error; null when the shader is valid.</summary>
     public string? ShaderError { get; private set; }
@@ -242,7 +243,16 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     private static string BuildRendererSignature(ShaderDefinition def, int width, int height) =>
         $"{Math.Max(1, width)}x{Math.Max(1, height)}:{JsonSerializer.Serialize(def)}";
 
-    public override void Update(double deltaTime) { }
+    public override void Update(double deltaTime)
+    {
+        int maxFps = Math.Max(1, Properties.Shader.MaxFps.CurrentValue);
+        _renderRequestAccumulator += deltaTime;
+        if (_renderRequestAccumulator < 1.0 / maxFps)
+            return;
+
+        _renderRequestAccumulator = 0;
+        ShaderToyBootstrapper.RequestRender();
+    }
 
     public override void Render(SKCanvas canvas, SKRect bounds, SKPaint paint)
     {

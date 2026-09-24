@@ -4,7 +4,7 @@
     "Description": "Renders Shadertoy GLSL shaders. Paste any shader from shadertoy.com and it runs as-is.",
     "Author": "Legit-Su",
     "Icon": "React",
-    "Version": "2.2.1.11",
+    "Version": "2.2.1.12",
     "Main": "Artemis.Plugins.LayerBrushes.Shadertoy.dll",
     "AutoEnableProperties": true,
     "RequiresAdmin": false,
