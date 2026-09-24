@@ -19,7 +19,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     private string? _pendingRendererSignature;
     private int _rendererBuildVersion;
     private bool _disposed;
-    private double _renderRequestAccumulator;
+    private bool _renderPumpRegistered;
 
     /// <summary>Last shader compile/link error; null when the shader is valid.</summary>
     public string? ShaderError { get; private set; }
@@ -28,12 +28,14 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     {
         ConfigurationDialog = new LayerBrushConfigurationDialog<ShaderPropertiesViewModel>(1300, 650);
         EnsureRenderer();
+        RegisterRenderPump();
     }
 
     public override void DisableLayerBrush()
     {
         // Keep the compiled renderer alive so toggling a layer does not recompile
         // large shaders. Dispose() still releases GL resources when the brush goes away.
+        UnregisterRenderPump();
     }
 
     /// <summary>Called by the UI after the user edits shader source, dimensions, or imports a new shader.</summary>
@@ -243,16 +245,25 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
     private static string BuildRendererSignature(ShaderDefinition def, int width, int height) =>
         $"{Math.Max(1, width)}x{Math.Max(1, height)}:{JsonSerializer.Serialize(def)}";
 
-    public override void Update(double deltaTime)
+    private void RegisterRenderPump()
     {
-        int maxFps = Math.Max(1, Properties.Shader.MaxFps.CurrentValue);
-        _renderRequestAccumulator += deltaTime;
-        if (_renderRequestAccumulator < 1.0 / maxFps)
+        if (_renderPumpRegistered)
             return;
 
-        _renderRequestAccumulator = 0;
-        ShaderToyBootstrapper.RequestRender();
+        _renderPumpRegistered = true;
+        ShaderToyBootstrapper.RegisterActiveBrush();
     }
+
+    private void UnregisterRenderPump()
+    {
+        if (!_renderPumpRegistered)
+            return;
+
+        _renderPumpRegistered = false;
+        ShaderToyBootstrapper.UnregisterActiveBrush();
+    }
+
+    public override void Update(double deltaTime) { }
 
     public override void Render(SKCanvas canvas, SKRect bounds, SKPaint paint)
     {
@@ -287,6 +298,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
         base.Dispose(disposing);
         lock (_lock)
         {
+            UnregisterRenderPump();
             _disposed = true;
             _rendererBuildVersion++;
             DestroyRenderer();
