@@ -9,6 +9,7 @@ namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 internal static unsafe class GlesProgramBinaryCache
 {
     private const int CacheVersion = 1;
+    private static readonly bool Enabled = false;
     private static bool? _isSupported;
 
     public static bool IsSupported()
@@ -34,6 +35,7 @@ internal static unsafe class GlesProgramBinaryCache
     public static bool TryLoadProgram(string key, out uint program)
     {
         program = 0;
+        if (!Enabled) return false;
         if (!IsSupported()) return false;
 
         string path = GetPath(key);
@@ -78,6 +80,7 @@ internal static unsafe class GlesProgramBinaryCache
 
     public static void SaveProgram(string key, uint program)
     {
+        if (!Enabled) return;
         if (!IsSupported()) return;
 
         try
