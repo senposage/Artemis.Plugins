@@ -8,11 +8,10 @@ namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 
 /// <summary>
 /// Minimal WASAPI loopback capture via raw COM P/Invoke.
-/// Captures the system's default render output as mono float samples.
+/// Captures the selected render output as left/right float samples.
 ///
-/// VoiceMeeter workaround: when the default render endpoint is a VoiceMeeter virtual
-/// device, loopback capture may not deliver frames. In that case we try to capture from
-/// VoiceMeeter's virtual output device instead, which does not require the LOOPBACK flag.
+/// Endpoint channel volume is applied manually because some drivers expose loopback
+/// samples before the Windows per-channel balance scalar is mixed in.
 /// </summary>
 internal sealed unsafe class WasapiLoopback : IDisposable
 {
@@ -24,13 +23,17 @@ internal sealed unsafe class WasapiLoopback : IDisposable
     private volatile bool _stopping;
     private IAudioClient? _audioClient;
     private IAudioCaptureClient? _captureClient;
+    private IAudioEndpointVolume? _endpointVolume;
     private Exception? _startupException;
     private int _channels;
+    private uint _channelMask;
     private bool _isFloat;
     private int _bitsPerSample;
     private int _bytesPerSample;
     private int _sampleRate;
     private int _blockAlign;
+    private readonly float[] _channelVolumes = new float[32];
+    private long _lastVolumeRefreshTick;
 
     private const uint LOOPBACK = 0x00020000u;
     private const uint DEVICE_STATE_ACTIVE = 1u;
@@ -39,6 +42,17 @@ internal sealed unsafe class WasapiLoopback : IDisposable
     private const int COINIT_MULTITHREADED = 0x0;
     private const int RPC_E_CHANGED_MODE = unchecked((int)0x80010106);
     private static readonly Guid Pcm = new("00000001-0000-0010-8000-00aa00389b71");
+    private const uint SPEAKER_FRONT_LEFT = 0x1;
+    private const uint SPEAKER_FRONT_RIGHT = 0x2;
+    private const uint SPEAKER_FRONT_CENTER = 0x4;
+    private const uint SPEAKER_LOW_FREQUENCY = 0x8;
+    private const uint SPEAKER_BACK_LEFT = 0x10;
+    private const uint SPEAKER_BACK_RIGHT = 0x20;
+    private const uint SPEAKER_FRONT_LEFT_OF_CENTER = 0x40;
+    private const uint SPEAKER_FRONT_RIGHT_OF_CENTER = 0x80;
+    private const uint SPEAKER_BACK_CENTER = 0x100;
+    private const uint SPEAKER_SIDE_LEFT = 0x200;
+    private const uint SPEAKER_SIDE_RIGHT = 0x400;
 
     public WasapiLoopback(string? deviceId = null)
     {
@@ -209,6 +223,19 @@ internal sealed unsafe class WasapiLoopback : IDisposable
             if (hr < 0) throw new COMException("IMMDevice.Activate(IAudioClient)", hr);
             _audioClient = (IAudioClient)acObj;
 
+            var evGuid = typeof(IAudioEndpointVolume).GUID;
+            hr = device.Activate(ref evGuid, 1, IntPtr.Zero, out object evObj);
+            if (hr >= 0)
+            {
+                _endpointVolume = (IAudioEndpointVolume)evObj;
+                RefreshChannelVolumes(force: true);
+            }
+            else
+            {
+                ShaderLogger.Log($"WasapiLoopback: endpoint volume unavailable hr=0x{hr:X8}; Windows balance will not be applied manually");
+                FillChannelVolumes(1f);
+            }
+
             hr = _audioClient.GetMixFormat(out IntPtr fmtPtr);
             if (hr < 0) throw new COMException("GetMixFormat", hr);
 
@@ -216,6 +243,7 @@ internal sealed unsafe class WasapiLoopback : IDisposable
             {
                 var fmt = (WAVEFORMATEX*)fmtPtr;
                 _channels = Math.Max(1, (int)fmt->nChannels);
+                _channelMask = 0;
                 _sampleRate = (int)fmt->nSamplesPerSec;
                 _blockAlign = fmt->nBlockAlign;
                 _bitsPerSample = fmt->wBitsPerSample;
@@ -228,13 +256,15 @@ internal sealed unsafe class WasapiLoopback : IDisposable
                     _isFloat = true;
                 else if (fmt->wFormatTag == 0xFFFE)
                 {
-                    subFormat = ((WAVEFORMATEXTENSIBLE*)fmt)->SubFormat;
+                    var extensible = (WAVEFORMATEXTENSIBLE*)fmt;
+                    _channelMask = extensible->dwChannelMask;
+                    subFormat = extensible->SubFormat;
                     _isFloat = subFormat == IeeeFloat;
                     if (!_isFloat && subFormat != Pcm)
                         ShaderLogger.Log($"WasapiLoopback: extensible subformat {subFormat} will be treated as PCM");
                 }
 
-                ShaderLogger.Log($"WasapiLoopback: mix format tag=0x{formatTag:X4}, sub={subFormat}, rate={_sampleRate}, channels={_channels}, bits={_bitsPerSample}, bytesPerSample={_bytesPerSample}, blockAlign={_blockAlign}, float={_isFloat}");
+                ShaderLogger.Log($"WasapiLoopback: mix format tag=0x{formatTag:X4}, sub={subFormat}, rate={_sampleRate}, channels={_channels}, mask=0x{_channelMask:X}, bits={_bitsPerSample}, bytesPerSample={_bytesPerSample}, blockAlign={_blockAlign}, float={_isFloat}");
 
                 long bufDuration = (streamFlags & LOOPBACK) != 0 ? 0L : 2_000_000L;
                 hr = _audioClient.Initialize(0, streamFlags, bufDuration, 0, fmtPtr, IntPtr.Zero);
@@ -266,6 +296,7 @@ internal sealed unsafe class WasapiLoopback : IDisposable
         try { _audioClient?.Stop(); } catch { }
         if (_captureClient != null) { Marshal.ReleaseComObject(_captureClient); _captureClient = null; }
         if (_audioClient != null) { Marshal.ReleaseComObject(_audioClient); _audioClient = null; }
+        if (_endpointVolume != null) { Marshal.ReleaseComObject(_endpointVolume); _endpointVolume = null; }
     }
 
     private void DeliverSilence(uint frames)
@@ -283,50 +314,183 @@ internal sealed unsafe class WasapiLoopback : IDisposable
         if (total > _left.Length * Math.Max(1, _channels)) return;
 
         int frameCount = (int)frames;
-        if (_isFloat && _bitsPerSample == 32)
-        {
-            var src = (float*)data;
-            for (int i = 0; i < frameCount; i++)
-            {
-                _left[i] = src[i * _channels];
-                _right[i] = _channels > 1 ? src[i * _channels + 1] : _left[i];
-            }
-        }
-        else if (!_isFloat && _bitsPerSample == 16)
-        {
-            var src = (short*)data;
-            for (int i = 0; i < frameCount; i++)
-            {
-                _left[i] = src[i * _channels] / 32768f;
-                _right[i] = _channels > 1 ? src[i * _channels + 1] / 32768f : _left[i];
-            }
-        }
-        else if (!_isFloat && _bitsPerSample == 24)
-        {
-            byte* src = (byte*)data;
-            for (int i = 0; i < frameCount; i++)
-            {
-                _left[i] = ReadPcm24(src, i, 0) / 8388608f;
-                _right[i] = _channels > 1 ? ReadPcm24(src, i, 1) / 8388608f : _left[i];
-            }
-        }
-        else if (!_isFloat && _bitsPerSample == 32)
-        {
-            var src = (int*)data;
-            for (int i = 0; i < frameCount; i++)
-            {
-                _left[i] = src[i * _channels] / 2147483648f;
-                _right[i] = _channels > 1 ? src[i * _channels + 1] / 2147483648f : _left[i];
-            }
-        }
-        else
+        if (!IsSupportedFormat())
         {
             ShaderLogger.Log($"WasapiLoopback: unsupported mix format bits={_bitsPerSample} channels={_channels} float={_isFloat} bytes={_bytesPerSample}");
             return;
         }
 
+        RefreshChannelVolumes(force: false);
+
+        for (int i = 0; i < frameCount; i++)
+            DownmixFrame(data, i, out _left[i], out _right[i]);
+
         DataAvailable?.Invoke(_left, _right, frameCount);
     }
+
+    private bool IsSupportedFormat()
+    {
+        return (_isFloat && _bitsPerSample == 32) ||
+               (!_isFloat && (_bitsPerSample == 16 || _bitsPerSample == 24 || _bitsPerSample == 32));
+    }
+
+    private void DownmixFrame(IntPtr data, int frame, out float left, out float right)
+    {
+        if (_channels == 1)
+        {
+            float mono = ReadSample(data, frame, 0) * GetChannelVolume(0);
+            left = mono;
+            right = mono;
+            return;
+        }
+
+        if (_channelMask != 0)
+        {
+            DownmixFrameByMask(data, frame, out left, out right);
+            return;
+        }
+
+        DownmixFrameByIndex(data, frame, out left, out right);
+    }
+
+    private void DownmixFrameByIndex(IntPtr data, int frame, out float left, out float right)
+    {
+        float Channel(int c) => ReadSample(data, frame, c) * GetChannelVolume(c);
+
+        switch (_channels)
+        {
+            case 4:
+                left = (Channel(0) + Channel(2)) * 0.5f;
+                right = (Channel(1) + Channel(3)) * 0.5f;
+                break;
+            case 6:
+                left = (Channel(0) + Channel(2) + Channel(3) + Channel(4)) * 0.25f;
+                right = (Channel(1) + Channel(2) + Channel(3) + Channel(5)) * 0.25f;
+                break;
+            case 8:
+                left = (Channel(0) + Channel(2) + Channel(3) + Channel(4) + Channel(6)) * 0.2f;
+                right = (Channel(1) + Channel(2) + Channel(3) + Channel(5) + Channel(7)) * 0.2f;
+                break;
+            default:
+                left = Channel(0);
+                right = Channel(1);
+                break;
+        }
+    }
+
+    private void DownmixFrameByMask(IntPtr data, int frame, out float left, out float right)
+    {
+        left = 0f;
+        right = 0f;
+        int leftCount = 0;
+        int rightCount = 0;
+
+        for (int c = 0; c < _channels; c++)
+        {
+            uint speaker = SpeakerForChannel(c);
+            float sample = ReadSample(data, frame, c) * GetChannelVolume(c);
+
+            if (IsLeftSpeaker(speaker))
+            {
+                left += sample;
+                leftCount++;
+            }
+            else if (IsRightSpeaker(speaker))
+            {
+                right += sample;
+                rightCount++;
+            }
+            else
+            {
+                left += sample;
+                right += sample;
+                leftCount++;
+                rightCount++;
+            }
+        }
+
+        if (leftCount > 0) left /= leftCount;
+        if (rightCount > 0) right /= rightCount;
+    }
+
+    private float ReadSample(IntPtr data, int frame, int channel)
+    {
+        if (_isFloat)
+        {
+            var src = (float*)data;
+            return src[frame * _channels + channel];
+        }
+
+        if (_bitsPerSample == 16)
+        {
+            var src = (short*)data;
+            return src[frame * _channels + channel] / 32768f;
+        }
+
+        if (_bitsPerSample == 24)
+        {
+            byte* src = (byte*)data;
+            return ReadPcm24(src, frame, channel) / 8388608f;
+        }
+
+        var src32 = (int*)data;
+        return src32[frame * _channels + channel] / 2147483648f;
+    }
+
+    private uint SpeakerForChannel(int channel)
+    {
+        uint mask = _channelMask;
+        for (int i = 0; i < channel; i++)
+            mask &= mask - 1;
+        return mask & ~(mask - 1);
+    }
+
+    private static bool IsLeftSpeaker(uint speaker) =>
+        speaker is SPEAKER_FRONT_LEFT or SPEAKER_BACK_LEFT or SPEAKER_SIDE_LEFT or SPEAKER_FRONT_LEFT_OF_CENTER;
+
+    private static bool IsRightSpeaker(uint speaker) =>
+        speaker is SPEAKER_FRONT_RIGHT or SPEAKER_BACK_RIGHT or SPEAKER_SIDE_RIGHT or SPEAKER_FRONT_RIGHT_OF_CENTER;
+
+    private void RefreshChannelVolumes(bool force)
+    {
+        if (_endpointVolume == null)
+        {
+            FillChannelVolumes(1f);
+            return;
+        }
+
+        long now = Environment.TickCount64;
+        if (!force && now - Interlocked.Read(ref _lastVolumeRefreshTick) < 100)
+            return;
+
+        Interlocked.Exchange(ref _lastVolumeRefreshTick, now);
+
+        int hr = _endpointVolume.GetChannelCount(out uint count);
+        if (hr < 0)
+        {
+            FillChannelVolumes(1f);
+            return;
+        }
+
+        int usable = Math.Min(_channelVolumes.Length, (int)count);
+        for (uint i = 0; i < usable; i++)
+        {
+            hr = _endpointVolume.GetChannelVolumeLevelScalar(i, out float scalar);
+            _channelVolumes[i] = hr < 0 ? 1f : scalar;
+        }
+
+        for (int i = usable; i < _channelVolumes.Length; i++)
+            _channelVolumes[i] = 1f;
+    }
+
+    private void FillChannelVolumes(float value)
+    {
+        for (int i = 0; i < _channelVolumes.Length; i++)
+            _channelVolumes[i] = value;
+    }
+
+    private float GetChannelVolume(int channel) =>
+        channel >= 0 && channel < _channelVolumes.Length ? _channelVolumes[channel] : 1f;
 
     private int ReadPcm24(byte* src, int frame, int channel)
     {
@@ -558,6 +722,30 @@ internal sealed unsafe class WasapiLoopback : IDisposable
             out uint pdwFlags, out ulong pu64DevicePosition, out ulong pu64QPCPosition);
         [PreserveSig] int ReleaseBuffer(uint NumFramesRead);
         [PreserveSig] int GetNextPacketSize(out uint pNumFramesInNextPacket);
+    }
+
+    [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioEndpointVolume
+    {
+        [PreserveSig] int RegisterControlChangeNotify(IntPtr pNotify);
+        [PreserveSig] int UnregisterControlChangeNotify(IntPtr pNotify);
+        [PreserveSig] int GetChannelCount(out uint pnChannelCount);
+        [PreserveSig] int SetMasterVolumeLevel(float fLevelDB, IntPtr pguidEventContext);
+        [PreserveSig] int SetMasterVolumeLevelScalar(float fLevel, IntPtr pguidEventContext);
+        [PreserveSig] int GetMasterVolumeLevel(out float pfLevelDB);
+        [PreserveSig] int GetMasterVolumeLevelScalar(out float pfLevel);
+        [PreserveSig] int SetChannelVolumeLevel(uint nChannel, float fLevelDB, IntPtr pguidEventContext);
+        [PreserveSig] int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, IntPtr pguidEventContext);
+        [PreserveSig] int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
+        [PreserveSig] int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
+        [PreserveSig] int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, IntPtr pguidEventContext);
+        [PreserveSig] int GetMute([MarshalAs(UnmanagedType.Bool)] out bool pbMute);
+        [PreserveSig] int GetVolumeStepInfo(out uint pnStep, out uint pnStepCount);
+        [PreserveSig] int VolumeStepUp(IntPtr pguidEventContext);
+        [PreserveSig] int VolumeStepDown(IntPtr pguidEventContext);
+        [PreserveSig] int QueryHardwareSupport(out uint pdwHardwareSupportMask);
+        [PreserveSig] int GetVolumeRange(out float pflVolumeMindB, out float pflVolumeMaxdB, out float pflVolumeIncrementdB);
     }
 }
 #endif

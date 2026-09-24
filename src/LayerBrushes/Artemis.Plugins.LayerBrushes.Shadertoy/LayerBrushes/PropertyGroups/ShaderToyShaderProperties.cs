@@ -21,6 +21,7 @@ public class ShaderToyShaderProperties : LayerPropertyGroup
     public IntLayerProperty Width     { get; set; }
     public IntLayerProperty Height    { get; set; }
     public IntLayerProperty MaxFps    { get; set; }
+    public IntLayerProperty PreviewFps { get; set; }
     /// <summary>When false, Audio channel inputs receive a silent stub texture.</summary>
     public BoolLayerProperty EnableAudio { get; set; }
     /// <summary>When true, audio texture channels are R=left, G=right, B=mono. When false, R/B contain mono for compatibility.</summary>
@@ -54,6 +55,7 @@ public class ShaderToyShaderProperties : LayerPropertyGroup
         Width.DefaultValue                = 512;
         Height.DefaultValue               = 512;
         MaxFps.DefaultValue               = 10;
+        PreviewFps.DefaultValue           = 2;
         EnableAudio.DefaultValue          = true;
         StereoAudioTexture.DefaultValue   = false;
         CubicResize.DefaultValue          = false;
