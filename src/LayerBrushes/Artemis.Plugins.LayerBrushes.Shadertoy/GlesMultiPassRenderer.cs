@@ -54,6 +54,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     }
 
     // ------------------------------------------------------------------
+    private readonly GlesRenderHost _host;
     private readonly GlesRenderThread _thread;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly Lock _bufferLock = new();
@@ -111,9 +112,10 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
 
     // ------------------------------------------------------------------
 
-    public GlesMultiPassRenderer(GlesRenderThread thread, ShaderDefinition shader, int width, int height)
+    public GlesMultiPassRenderer(ShaderDefinition shader, int width, int height)
     {
-        _thread = thread;
+        _host = new GlesRenderHost();
+        _thread = _host.Thread;
         Width   = Math.Max(1, width);
         Height  = Math.Max(1, height);
         _pixels = new byte[Width * Height * 4];
@@ -559,6 +561,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
         _thread.Invoke(Teardown);
         _pixels = null;
         _renderPixels = null;
+        _host.Dispose();
     }
 
     private void Teardown()

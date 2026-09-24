@@ -9,8 +9,6 @@ namespace Artemis.Plugins.LayerBrushes.Shadertoy;
 
 public class ShaderToyLayerBrushProvider : LayerBrushProvider
 {
-    internal static GlesRenderThread? RenderThread    { get; private set; }
-    internal static GlesContext?      GlesContext     { get; private set; }
     internal static string?           PluginDirectory { get; private set; }
 
     // Folder the ANGLE DLLs are actually loaded from.
@@ -69,18 +67,7 @@ public class ShaderToyLayerBrushProvider : LayerBrushProvider
             _resolverRegistered = true;
         }
 
-        try
-        {
-            var thread = new GlesRenderThread();
-            GlesContext  = new GlesContext(thread);
-            RenderThread = thread;
-            ShaderLogger.Log("Enable: GlesRenderThread and GlesContext created OK");
-        }
-        catch (Exception ex)
-        {
-            ShaderLogger.Log($"Enable: FAILED to create GL context: {ex}");
-            throw;
-        }
+        ShaderLogger.Log("Enable: GL contexts will be created per Shadertoy renderer");
 
         RegisterLayerBrushDescriptor<ShaderToyLayerBrush>("Shader Toy", "Renders Shadertoy GLSL shaders", "React");
     }
@@ -88,10 +75,6 @@ public class ShaderToyLayerBrushProvider : LayerBrushProvider
     public override void Disable()
     {
         AudioCapture.Stop();  // no-op if never started
-        GlesContext?.Dispose();
-        RenderThread?.Dispose();
-        GlesContext  = null;
-        RenderThread = null;
     }
 
     // -------------------------------------------------------------------------

@@ -163,8 +163,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
 
     private void ScheduleRendererRebuild(ShaderDefinition def, int width, int height, string signature)
     {
-        var thread = ShaderToyLayerBrushProvider.RenderThread;
-        if (thread == null || _disposed) return;
+        if (_disposed) return;
 
         ShaderError = null;
         _pendingRendererSignature = signature;
@@ -180,7 +179,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
 
             try
             {
-                renderer = new GlesMultiPassRenderer(thread, def, width, height);
+                renderer = new GlesMultiPassRenderer(def, width, height);
                 if (!renderer.IsValid)
                 {
                     error = renderer.ErrorMessage;
