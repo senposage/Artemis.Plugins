@@ -1,5 +1,6 @@
 using Artemis.Core;
 using Artemis.Core.Services;
+using Avalonia.Threading;
 using System;
 using System.Threading;
 
@@ -13,6 +14,7 @@ public class ShaderToyBootstrapper : PluginBootstrapper
     private static Timer? _renderPump;
     private static int _activeBrushes;
     private static int _requestInProgress;
+    private static int _requestQueued;
 
     public override void OnPluginEnabled(Plugin plugin)
     {
@@ -26,6 +28,7 @@ public class ShaderToyBootstrapper : PluginBootstrapper
         _renderService = null;
         _activeBrushes = 0;
         _requestInProgress = 0;
+        _requestQueued = 0;
     }
 
     internal static void RegisterActiveBrush()
@@ -35,6 +38,7 @@ public class ShaderToyBootstrapper : PluginBootstrapper
 
         _renderPump ??= new Timer(_ => RequestRenderFromPump(), null, Timeout.Infinite, Timeout.Infinite);
         _renderPump.Change(0, RenderPumpIntervalMs);
+        ShaderLogger.Log("RenderPump: started");
     }
 
     internal static void UnregisterActiveBrush()
@@ -44,10 +48,24 @@ public class ShaderToyBootstrapper : PluginBootstrapper
 
         Interlocked.Exchange(ref _activeBrushes, 0);
         _renderPump?.Change(Timeout.Infinite, Timeout.Infinite);
+        ShaderLogger.Log("RenderPump: stopped");
     }
 
     private static void RequestRenderFromPump()
     {
+        if (_renderService == null || Volatile.Read(ref _activeBrushes) <= 0)
+            return;
+
+        if (Interlocked.Exchange(ref _requestQueued, 1) == 1)
+            return;
+
+        Dispatcher.UIThread.Post(RequestRenderOnUiThread, DispatcherPriority.Render);
+    }
+
+    private static void RequestRenderOnUiThread()
+    {
+        Interlocked.Exchange(ref _requestQueued, 0);
+
         if (_renderService == null || Volatile.Read(ref _activeBrushes) <= 0)
             return;
 
