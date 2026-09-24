@@ -80,7 +80,6 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     private int  _frame;
     private double _lastTime;
     private double _lastRenderTime = double.NegativeInfinity;
-    private double _lastPreviewRenderTime = double.NegativeInfinity;
     private volatile int _maxFps = 10;
     private byte[]? _pixels;
     private readonly Dictionary<nint, int> _copiedFrames = [];
@@ -454,31 +453,27 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     // ------------------------------------------------------------------
     public void RenderToBuffer(SKBitmap bitmap)
     {
-        RenderToBuffer(bitmap, _maxFps, usePreviewThrottle: false);
+        RenderToBuffer(bitmap, _maxFps, updateLiveThrottle: true);
     }
 
-    public void RenderPreviewToBuffer(SKBitmap bitmap, int maxFps)
+    public void RenderPreviewToBuffer(SKBitmap bitmap)
     {
-        RenderToBuffer(bitmap, maxFps, usePreviewThrottle: true);
+        RenderToBuffer(bitmap, 0, updateLiveThrottle: false);
     }
 
-    private void RenderToBuffer(SKBitmap bitmap, int maxFps, bool usePreviewThrottle)
+    private void RenderToBuffer(SKBitmap bitmap, int maxFps, bool updateLiveThrottle)
     {
         if (!IsValid || _pixels == null) return;
 
         lock (_bufferLock)
         {
-            maxFps = Math.Max(1, maxFps);
             double now = _clock.Elapsed.TotalSeconds;
-            double lastRenderTime = usePreviewThrottle ? _lastPreviewRenderTime : _lastRenderTime;
-            if (now - lastRenderTime >= 1.0 / maxFps)
+            bool shouldRender = maxFps <= 0 || now - _lastRenderTime >= 1.0 / Math.Max(1, maxFps);
+            if (shouldRender)
             {
                 _thread.Invoke(RenderFrame);
-                lastRenderTime = now;
-                if (usePreviewThrottle)
-                    _lastPreviewRenderTime = lastRenderTime;
-                else
-                    _lastRenderTime = lastRenderTime;
+                if (updateLiveThrottle)
+                    _lastRenderTime = now;
             }
 
             nint dstKey = bitmap.GetPixels();

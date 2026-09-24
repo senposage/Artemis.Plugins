@@ -112,7 +112,7 @@ public class ShaderToyLayerBrush : LayerBrush<ShaderToyPropertyGroup>
             AudioCapture.MaxFrequency   = Properties.Shader.AudioMaxFreq.CurrentValue;
             AudioCapture.FrequencyScale = (SpectrumMode)Properties.Shader.AudioSpectrumMode.CurrentValue;
             AudioCapture.EnsureActive(_renderer.EnableAudio);
-            _renderer.RenderPreviewToBuffer(bitmap, Properties.Shader.PreviewFps.CurrentValue);
+            _renderer.RenderPreviewToBuffer(bitmap);
             return true;
         }
     }

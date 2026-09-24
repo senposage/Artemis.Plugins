@@ -20,6 +20,8 @@ namespace Artemis.Plugins.LayerBrushes.Shadertoy.Screens;
 
 public class ShaderPropertiesViewModel : BrushConfigurationViewModel
 {
+    private static readonly TimeSpan PreviewRefreshInterval = TimeSpan.FromMilliseconds(16);
+
     private SKBitmap? _previewBitmap;
     private readonly ShaderToyShaderProperties _properties;
     private readonly DispatcherTimer _updateTimer;
@@ -33,20 +35,6 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
 
     private int _maxFps;
     public int MaxFps { get => _maxFps; set => RaiseAndSetIfChanged(ref _maxFps, value); }
-
-    private int _previewFps;
-    public int PreviewFps
-    {
-        get => _previewFps;
-        set
-        {
-            int previewFps = Math.Max(1, value);
-            if (_previewFps == previewFps) return;
-            RaiseAndSetIfChanged(ref _previewFps, previewFps);
-            if (!_isLoading)
-                UpdatePreviewInterval();
-        }
-    }
 
     private bool _enableAudio;
     public bool EnableAudio { get => _enableAudio; set => RaiseAndSetIfChanged(ref _enableAudio, value); }
@@ -177,7 +165,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         ShaderToyLayerBrush = layerBrush;
         _properties = layerBrush.Properties.Shader;
 
-        _updateTimer = new DispatcherTimer(TimeSpan.FromSeconds(1.0 / 2.0), DispatcherPriority.Background,
+        _updateTimer = new DispatcherTimer(PreviewRefreshInterval, DispatcherPriority.Background,
             (_, _) => UpdatePreview());
 
         Passes.CollectionChanged += (_, _) =>
@@ -203,7 +191,6 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         Width        = _properties.Width;
         Height       = _properties.Height;
         MaxFps       = _properties.MaxFps;
-        PreviewFps   = _properties.PreviewFps;
         EnableAudio  = _properties.EnableAudio;
         StereoAudioTexture = _properties.StereoAudioTexture;
         CubicResize  = _properties.CubicResize;
@@ -233,7 +220,6 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         }
 
         _isLoading = false;
-        UpdatePreviewInterval();
     }
 
     public void Save()
@@ -242,7 +228,6 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
         _properties.Width.SetCurrentValue(Width);
         _properties.Height.SetCurrentValue(Height);
         _properties.MaxFps.SetCurrentValue(MaxFps);
-        _properties.PreviewFps.SetCurrentValue(PreviewFps);
         _properties.EnableAudio.SetCurrentValue(EnableAudio);
         _properties.StereoAudioTexture.SetCurrentValue(StereoAudioTexture);
         _properties.CubicResize.SetCurrentValue(CubicResize);
@@ -476,7 +461,7 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
     {
         Load();
         RecreatePreviewSurface();
-        UpdatePreviewInterval();
+        _updateTimer.Interval = PreviewRefreshInterval;
         _updateTimer.Start();
 
         Disposable.Create(() =>
@@ -511,12 +496,6 @@ public class ShaderPropertiesViewModel : BrushConfigurationViewModel
                                            PixelFormat.Rgba8888, AlphaFormat.Opaque);
         _previewBitmap?.Dispose();
         _previewBitmap = new SKBitmap(w, h, SKColorType.Rgba8888, SKAlphaType.Opaque);
-    }
-
-    private void UpdatePreviewInterval()
-    {
-        int fps = Math.Clamp(PreviewFps, 1, 60);
-        _updateTimer.Interval = TimeSpan.FromSeconds(1.0 / fps);
     }
 
     private void OnSizeChanged(object? sender, PropertyChangedEventArgs e)
