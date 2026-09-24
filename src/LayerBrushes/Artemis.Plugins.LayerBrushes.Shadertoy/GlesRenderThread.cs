@@ -49,6 +49,20 @@ internal sealed class GlesRenderThread : IDisposable
         error?.Throw();
     }
 
+    /// <summary>Queues <paramref name="action"/> on the GL thread without blocking the caller.</summary>
+    public bool Post(Action action)
+    {
+        if (_cts.IsCancellationRequested) return false;
+
+        try
+        {
+            _queue.Add(action, _cts.Token);
+            return true;
+        }
+        catch (OperationCanceledException) { return false; }
+        catch (ObjectDisposedException)    { return false; }
+    }
+
     private void Loop()
     {
         while (!_cts.IsCancellationRequested)

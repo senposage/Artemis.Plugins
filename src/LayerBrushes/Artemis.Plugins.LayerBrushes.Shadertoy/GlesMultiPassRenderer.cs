@@ -57,6 +57,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     private readonly GlesRenderThread _thread;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly Lock _bufferLock = new();
+    private readonly Lock _displayLock = new();
 
     private uint _vao;          // shared fullscreen quad
     private uint _imageFbo;     // output FBO for the Image pass
@@ -82,6 +83,9 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     private double _lastRenderTime = double.NegativeInfinity;
     private volatile int _maxFps = 10;
     private byte[]? _pixels;
+    private byte[]? _renderPixels;
+    private int _displayFrame;
+    private int _queuedOrRendering;
     private readonly Dictionary<nint, int> _copiedFrames = [];
 
     // Mouse state — Shadertoy iMouse convention.
@@ -113,6 +117,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
         Width   = Math.Max(1, width);
         Height  = Math.Max(1, height);
         _pixels = new byte[Width * Height * 4];
+        _renderPixels = new byte[Width * Height * 4];
         _thread.Invoke(() => Setup(shader));
     }
 
@@ -244,7 +249,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     // ------------------------------------------------------------------
     private void RenderFrame()
     {
-        if (_pixels == null || _passes.Length == 0) return;
+        if (_renderPixels == null || _passes.Length == 0) return;
 
         double t  = _clock.Elapsed.TotalSeconds;
         double dt = t - _lastTime;
@@ -309,7 +314,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
 
             uint errAfterDraw = glGetError();
 
-            fixed (byte* p = _pixels)
+            fixed (byte* p = _renderPixels)
                 glReadPixels(0, 0, Width, Height, GL_RGBA, GL_UNSIGNED_BYTE, p);
 
             uint errAfterRead = glGetError();
@@ -320,6 +325,12 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
             if (_frame <= 3 || errAfterDraw != 0 || errAfterRead != 0)
                 ShaderLogger.Log($"RenderFrame #{_frame}: errDraw=0x{errAfterDraw:X4} errRead=0x{errAfterRead:X4} t={t:F2}s" +
                     $" audio={_hasAudioInput}/ena={EnableAudio}/run={AudioCapture.IsRunning}");
+        }
+
+        lock (_displayLock)
+        {
+            (_pixels, _renderPixels) = (_renderPixels, _pixels);
+            _displayFrame = _frame;
         }
 
         // Unbind all texture units
@@ -453,34 +464,75 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     // ------------------------------------------------------------------
     public void RenderToBuffer(SKBitmap bitmap)
     {
-        RenderToBuffer(bitmap, _maxFps, updateLiveThrottle: true);
+        QueueRenderIfDue(_maxFps);
+        CopyLastFrameTo(bitmap);
     }
 
     public void RenderPreviewToBuffer(SKBitmap bitmap)
     {
-        RenderToBuffer(bitmap, 0, updateLiveThrottle: false);
+        RenderNow();
+        CopyLastFrameTo(bitmap);
     }
 
-    private void RenderToBuffer(SKBitmap bitmap, int maxFps, bool updateLiveThrottle)
+    private void QueueRenderIfDue(int maxFps)
     {
-        if (!IsValid || _pixels == null) return;
+        if (!IsValid || _renderPixels == null) return;
 
-        lock (_bufferLock)
-        {
-            double now = _clock.Elapsed.TotalSeconds;
-            bool shouldRender = maxFps <= 0 || now - _lastRenderTime >= 1.0 / Math.Max(1, maxFps);
-            if (shouldRender)
+        double now = _clock.Elapsed.TotalSeconds;
+        if (now - _lastRenderTime < 1.0 / Math.Max(1, maxFps))
+            return;
+
+        if (Interlocked.Exchange(ref _queuedOrRendering, 1) == 1)
+            return;
+
+        _lastRenderTime = now;
+        if (!_thread.Post(() =>
             {
-                _thread.Invoke(RenderFrame);
-                if (updateLiveThrottle)
-                    _lastRenderTime = now;
-            }
+                try
+                {
+                    lock (_bufferLock)
+                        RenderFrame();
+                }
+                catch (Exception ex)
+                {
+                    ShaderLogger.Log($"RenderFrame async failed: {ex.Message}");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _queuedOrRendering, 0);
+                }
+            }))
+        {
+            Interlocked.Exchange(ref _queuedOrRendering, 0);
+        }
+    }
 
-            nint dstKey = bitmap.GetPixels();
-            if (_copiedFrames.TryGetValue(dstKey, out int copiedFrame) && copiedFrame == _frame)
+    private void RenderNow()
+    {
+        if (!IsValid || _renderPixels == null) return;
+
+        _thread.Invoke(() =>
+        {
+            lock (_bufferLock)
+                RenderFrame();
+        });
+    }
+
+    private void CopyLastFrameTo(SKBitmap bitmap)
+    {
+        if (_pixels == null) return;
+
+        nint dstKey = bitmap.GetPixels();
+        if (bitmap.Width != Width || bitmap.Height != Height)
+            return;
+
+        lock (_displayLock)
+        {
+            if (_pixels == null)
                 return;
 
-            if (bitmap.Width != Width || bitmap.Height != Height)
+            int frame = _displayFrame;
+            if (_copiedFrames.TryGetValue(dstKey, out int copiedFrame) && copiedFrame == frame)
                 return;
 
             // Y-flip: GL bottom-left → Skia top-left
@@ -497,7 +549,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
 
             if (_copiedFrames.Count > 8)
                 _copiedFrames.Clear();
-            _copiedFrames[dstKey] = _frame;
+            _copiedFrames[dstKey] = frame;
         }
     }
 
@@ -506,6 +558,7 @@ internal sealed unsafe class GlesMultiPassRenderer : IDisposable
     {
         _thread.Invoke(Teardown);
         _pixels = null;
+        _renderPixels = null;
     }
 
     private void Teardown()
