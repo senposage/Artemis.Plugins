@@ -14,6 +14,7 @@ using Windows.Graphics;
 using Windows.Graphics.Capture;
 using Windows.Graphics.DirectX;
 using Windows.Graphics.DirectX.Direct3D11;
+using Windows.Foundation;
 using WinRT;
 
 namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.Wgc;
@@ -74,6 +75,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
 
     // Persistent — expensive to create, reused across capture cycles
     private GraphicsCaptureItem? _captureItem;
+    private TypedEventHandler<GraphicsCaptureItem, object>? _captureItemClosedHandler;
     private volatile bool _closed;
 
     // Session + pool — kept alive between frames, only torn down on Restart/Dispose
@@ -189,8 +191,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
             {
                 Logger.Debug("WGC capture item was closed, recreating for {Display}", Display.DeviceName);
                 StopSessionUnlocked();
-                _captureItem = null;
-                _closed = false;
+                ReleaseCaptureItem();
             }
 
             IntPtr hMonitor = Direct3DHelper.GetMonitorHandle(Display.DeviceName);
@@ -198,14 +199,28 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
                 throw new InvalidOperationException($"Could not find HMONITOR for '{Display.DeviceName}'");
 
             _captureItem = CreateCaptureItemForMonitor(hMonitor);
-            _captureItem.Closed += (_, _) =>
+            _captureItemClosedHandler = (sender, _) =>
             {
+                if (!ReferenceEquals(sender, _captureItem))
+                    return;
+
                 Logger.Debug("WGC capture item closed for {Display}", Display.DeviceName);
                 _closed = true;
             };
+            _captureItem.Closed += _captureItemClosedHandler;
             Logger.Debug("WGC capture item created for {Display}, size={W}x{H}",
                 Display.DeviceName, _captureItem.Size.Width, _captureItem.Size.Height);
         }
+    }
+
+    private void ReleaseCaptureItem()
+    {
+        if (_captureItem != null && _captureItemClosedHandler != null)
+            _captureItem.Closed -= _captureItemClosedHandler;
+
+        _captureItemClosedHandler = null;
+        _captureItem = null;
+        _closed = false;
     }
 
     /// <summary>
@@ -252,6 +267,9 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
 
     private void OnFrameArrived(Direct3D11CaptureFramePool sender, object args)
     {
+        if (_disposed || !ReferenceEquals(sender, _framePool))
+            return;
+
         try
         {
             Direct3D11CaptureFrame? frame = sender.TryGetNextFrame();
@@ -260,6 +278,12 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
 
             lock (_frameLock)
             {
+                if (_disposed || !ReferenceEquals(sender, _framePool))
+                {
+                    frame.Dispose();
+                    return;
+                }
+
                 _pendingFrame?.Dispose();
                 _pendingFrame = frame;
                 Interlocked.Increment(ref _framesArrived);
@@ -365,7 +389,11 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
             _heldFrame = null;
             _session?.Dispose();
             _session = null;
-            _framePool?.Dispose();
+            if (_framePool != null)
+            {
+                _framePool.FrameArrived -= OnFrameArrived;
+                _framePool.Dispose();
+            }
             _framePool = null;
         }
     }
@@ -382,7 +410,11 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         _heldFrame = null;
         _session?.Dispose();
         _session = null;
-        _framePool?.Dispose();
+        if (_framePool != null)
+        {
+            _framePool.FrameArrived -= OnFrameArrived;
+            _framePool.Dispose();
+        }
         _framePool = null;
     }
 
@@ -622,7 +654,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         lock (_sessionLock)
         {
             StopSessionUnlocked();
-            _captureItem = null;
+            ReleaseCaptureItem();
             DisposeGpuResources();
         }
     }
@@ -633,7 +665,7 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
         lock (_sessionLock)
         {
             StopSessionUnlocked();
-            _captureItem = null;
+            ReleaseCaptureItem();
             DisposeGpuResources();
         }
     }
