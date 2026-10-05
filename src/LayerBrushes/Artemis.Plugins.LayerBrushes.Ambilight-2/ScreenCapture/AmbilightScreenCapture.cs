@@ -770,7 +770,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             if (now < _nextBlackSkipLog)
                 return;
 
-            AmbilightWindowsDiagnostics.Write(Logger,
+            AmbilightWindowsDiagnostics.WriteVerbose(Logger,
                 $"capture loop skip for {Display.DeviceName}: {reason} (suspended={_suspended} displayOff={_displayOff} windowsDisplayOff={IsWindowsDisplayOffLatchedForThisInstance()} ddcEverWorked={_ddcEverWorked})");
             _nextBlackSkipLog = now + TimeSpan.FromSeconds(5);
         }
@@ -784,7 +784,7 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
             if (now < _nextCaptureFalseLog)
                 return;
 
-            AmbilightWindowsDiagnostics.Write(Logger,
+            AmbilightWindowsDiagnostics.WriteVerbose(Logger,
                 $"capture returned no frame for {Display.DeviceName}; backend={CaptureBackendDetails}; suspended={_suspended}; displayOff={_displayOff}; windowsDisplayOff={IsWindowsDisplayOffLatchedForThisInstance()}; zones={_zoneCount}");
             _nextCaptureFalseLog = now + TimeSpan.FromSeconds(5);
         }

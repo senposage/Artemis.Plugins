@@ -15,6 +15,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
         private readonly List<GraphicsCard> _graphicsCards;
         private readonly Dictionary<GraphicsCard, List<Display>> _displays = [];
 
+        internal bool UsesWindowsGraphicsCapture => _screenCaptureService is Wgc.WgcScreenCaptureService;
+
         #endregion
 
         #region Constructors
@@ -110,6 +112,22 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture
                 {
                     if (screenCapture is AmbilightScreenCapture ambilightCapture)
                         ambilightCapture.Resume(clearDisplayOffState: false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Recreates the native session behind each existing capture wrapper without replacing
+        /// the capture service, display objects, or registered zones.
+        /// </summary>
+        internal void RestartAllCaptures()
+        {
+            lock (_screenCaptures)
+            {
+                foreach (IScreenCapture screenCapture in _screenCaptures.Values)
+                {
+                    if (screenCapture is AmbilightScreenCapture ambilightCapture)
+                        ambilightCapture.Restart();
                 }
             }
         }

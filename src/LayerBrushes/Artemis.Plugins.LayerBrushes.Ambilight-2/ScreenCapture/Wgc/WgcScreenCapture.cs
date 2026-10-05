@@ -653,9 +653,20 @@ internal sealed class WgcScreenCapture : IScreenCapture, ICaptureBackendStatus
     {
         lock (_sessionLock)
         {
+            long framesArrived = Interlocked.Read(ref _framesArrived);
+            long framesConsumed = Interlocked.Read(ref _framesConsumed);
+            bool hadSession = _session != null;
+            bool hadFramePool = _framePool != null;
+            bool hadCaptureItem = _captureItem != null;
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"WGC restart cleanup starting for {Display.DeviceName}; session={hadSession}; framePool={hadFramePool}; captureItem={hadCaptureItem}; framesArrived={framesArrived}; framesConsumed={framesConsumed}");
+
             StopSessionUnlocked();
             ReleaseCaptureItem();
             DisposeGpuResources();
+
+            AmbilightWindowsDiagnostics.Write(Logger,
+                $"WGC restart cleanup complete for {Display.DeviceName}; session={_session != null}; framePool={_framePool != null}; captureItem={_captureItem != null}; heldFrame={_heldFrame != null}; pendingFrame={_pendingFrame != null}");
         }
     }
 

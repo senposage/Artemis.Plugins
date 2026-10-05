@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Artemis.Core;
 using Artemis.Core.Services;
+using Artemis.UI.Shared;
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture;
 using Artemis.Plugins.LayerBrushes.Ambilight.ScreenCapture.PortalPipeWire;
 #if WINDOWS
@@ -46,6 +47,8 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         public override void OnPluginEnabled(Plugin plugin)
         {
+            AmbilightWindowsDiagnostics.SetVerboseCaptureDiagnostics(
+                plugin.Resolve<AmbilightDiagnosticsSettings>().VerboseCaptureDiagnostics);
             _logger = plugin.Resolve<ILogger>();
             _managementService = plugin.Resolve<IPluginManagementService>();
             _renderService = plugin.Resolve<IRenderService>();
@@ -94,6 +97,11 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
                 _displayStateMonitor = new WindowsDisplayStateMonitor();
                 _displayStateMonitor.DisplayStateChanged += DisplayStateMonitorOnDisplayStateChanged;
             }
+        }
+
+        public override void OnPluginLoaded(Plugin plugin)
+        {
+            plugin.ConfigurationDialog = new PluginConfigurationDialog<Screens.AmbilightConfigurationViewModel>(true);
         }
 
         public override void OnPluginDisabled(Plugin plugin)
@@ -308,6 +316,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
 
         private void SystemEventsOnDisplaySettingsChanging(object? sender, EventArgs e)
         {
+            if (ScreenCaptureService?.UsesWindowsGraphicsCapture == true)
+            {
+                // This notification is desktop-wide, including when only one monitor enters
+                // DPMS. WGC owns its capture-item lifetime and does not need a global teardown.
+                _logger?.Debug("Display settings changing while using WGC; leaving captures active");
+                return;
+            }
+
             _logger?.Debug("Display settings changing, suspending all screen captures");
             AmbilightScreenCapture.MarkDisplayTopologyUnstable(TimeSpan.FromMilliseconds(DisplaySettledDelayMs));
             ScreenCaptureService?.SuspendAllCaptures();
@@ -319,6 +335,35 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             if (_brushProvider?.Instance == null || !_brushProvider.Instance.IsEnabled)
             {
                 _logger?.Debug("Display settings changed, but ambilight feature is disabled");
+                return;
+            }
+
+            if (ScreenCaptureService?.UsesWindowsGraphicsCapture == true)
+            {
+                // DPMS can leave a WGC item alive while its session no longer delivers frames.
+                // Restart existing wrappers after Windows has settled, preserving their zones
+                // and display mapping instead of rebuilding the capture service.
+                _logger?.Debug("Display settings changed while using WGC; waiting {Delay}ms to restart existing captures", DisplaySettledDelayMs);
+                _displaySettledTimer?.Dispose();
+                _displaySettledTimer = new Timer(_ =>
+                {
+                    if (_brushProvider?.Instance?.IsEnabled != true ||
+                        ScreenCaptureService?.UsesWindowsGraphicsCapture != true)
+                        return;
+
+                    try
+                    {
+                        _logger?.Debug("Display state settled; restarting existing WGC captures");
+                        ScreenCaptureService.RestartAllCaptures();
+                        RequestImmediateRender();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.Error(ex, "Failed to restart existing WGC captures after display settings changed");
+                        AmbilightWindowsDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(),
+                            $"WGC in-place restart failed: {ex.GetBaseException().Message}");
+                    }
+                }, null, DisplaySettledDelayMs, Timeout.Infinite);
                 return;
             }
 
@@ -365,6 +410,14 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight
             _logger?.Debug("GUID_CONSOLE_DISPLAY_STATE = {State}", displayState);
             AmbilightWindowsDiagnostics.Write(_logger ?? Log.ForContext<AmbilightBootstrapper>(),
                 $"GUID_CONSOLE_DISPLAY_STATE={displayState}");
+
+            if (ScreenCaptureService?.UsesWindowsGraphicsCapture == true)
+            {
+                // GUID_CONSOLE_DISPLAY_STATE does not identify which monitor changed, so it
+                // cannot safely drive a global WGC capture restart or suspension.
+                _logger?.Debug("Console display state changed while using WGC; leaving captures active");
+                return;
+            }
             AmbilightScreenCapture.MarkDisplayTopologyUnstable(TimeSpan.FromMilliseconds(DisplaySettledDelayMs));
 
             if (displayState != 0)

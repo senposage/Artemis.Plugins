@@ -1,0 +1,24 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:screens="clr-namespace:Artemis.Plugins.LayerBrushes.Ambilight.Screens"
+             mc:Ignorable="d"
+             x:Class="Artemis.Plugins.LayerBrushes.Ambilight.Screens.AmbilightConfigurationView"
+             x:DataType="screens:AmbilightConfigurationViewModel">
+    <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="12">
+        <TextBlock Classes="plugin-introduction" TextWrapping="Wrap">
+            Configure diagnostics for Ambilight v2. Capture errors and resource-lifecycle events are always retained.
+        </TextBlock>
+        <StackPanel Grid.Row="1" Spacing="4">
+            <CheckBox Content="Enable verbose capture diagnostics"
+                      IsChecked="{CompiledBinding EnableVerboseCaptureDiagnostics}" />
+            <TextBlock Classes="hint" TextWrapping="Wrap">
+                Writes throttled no-frame and paused-capture-loop messages. Leave disabled during normal use.
+            </TextBlock>
+        </StackPanel>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Classes="accent" Command="{CompiledBinding SaveChanges}">Save changes</Button>
+        </StackPanel>
+    </Grid>
+</UserControl>

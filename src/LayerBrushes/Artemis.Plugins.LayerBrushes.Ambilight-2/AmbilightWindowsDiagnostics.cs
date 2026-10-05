@@ -6,6 +6,13 @@ namespace Artemis.Plugins.LayerBrushes.Ambilight;
 
 internal static class AmbilightWindowsDiagnostics
 {
+    private static volatile bool _verboseCaptureDiagnostics;
+
+    public static void SetVerboseCaptureDiagnostics(bool enabled)
+    {
+        _verboseCaptureDiagnostics = enabled;
+    }
+
     public static string LogPath
     {
         get
@@ -21,6 +28,12 @@ internal static class AmbilightWindowsDiagnostics
     {
         logger.Debug("[Ambilight/Windows] {Message}", message);
         Write(message);
+    }
+
+    public static void WriteVerbose(ILogger logger, string message)
+    {
+        if (_verboseCaptureDiagnostics)
+            Write(logger, message);
     }
 
     public static void Write(string message)
