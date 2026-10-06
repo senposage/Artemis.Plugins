@@ -265,7 +265,14 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                         removalsConfirmed = IsRemovalSnapshotStable(definition, currentIds);
                     }
                     if (!removalsConfirmed)
-                        removedControllers = [];
+                    {
+                        // A replacement controller can appear before OpenRGB finishes
+                        // removing the old one. Publish neither side of that partial
+                        // snapshot; the next confirmed snapshot will reconcile both.
+                        definition.Connected = true;
+                        definition.LastError = null;
+                        continue;
+                    }
 
                     foreach (uint removed in removedControllers)
                     {
@@ -291,9 +298,7 @@ public sealed class OpenRGBDeviceProvider : AbstractRGBDeviceProvider
                             AddDevice(addedDevice);
                     }
 
-                    _controllerIds[definition] = removalsConfirmed
-                        ? currentIds
-                        : previousIds.Union(currentIds).ToHashSet();
+                    _controllerIds[definition] = currentIds;
                     definition.Connected = true;
                     definition.LastError = null;
                 }

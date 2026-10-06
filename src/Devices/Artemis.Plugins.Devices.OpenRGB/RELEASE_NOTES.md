@@ -1,4 +1,4 @@
-# OpenRGB Devices v6 — 2026.0923.1349 (test build)
+# OpenRGB Devices v6 — 2026.1005.2208 (Linux test build)
 
 This plugin build pairs with the Artemis device-hotplug recovery branch. It is
 for local testing, not an official release.
@@ -21,6 +21,9 @@ for local testing, not an official release.
   The SDK cannot switch a single zone independently.
 - Continue to wait for detection completion and a stable reduced device list
   before publishing removals to Artemis.
+- Hold new controller additions as well as removals while that reduced list is
+  unconfirmed. This prevents an OpenRGB replacement from appearing as a second
+  Artemis device before the old controller is disconnected and rebound.
 
 ## Validation and limits
 
@@ -28,6 +31,7 @@ for local testing, not an official release.
 - Matching Artemis core hotplug tests: 18 passed.
 - Physical hotplug and Direct-mode recovery with this specific plugin build
   still need to be confirmed by the tester.
+- Packaged for Linux x64 alongside the Artemis hotplug-recovery test build.
 - A missing device with a signature shared by another missing device is not
   auto-merged. OpenRGB devices without an advertised Direct mode are not
   switched by this setting.
